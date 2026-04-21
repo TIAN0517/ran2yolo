@@ -1,0 +1,160 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|Win32">
+      <Configuration>Release</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release_Win7|Win32">
+      <Configuration>Release_Win7</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>16.0</VCProjectVersion>
+    <Keyword>Win32Proj</Keyword>
+    <ProjectGuid>{B2C3D4E5-1234-5678-9ABC-DEF012345678}</ProjectGuid>
+    <RootNamespace>JyTrainer</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0.19041.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <PlatformToolset>v142</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+    <EnableEditAndContinue>false</EnableEditAndContinue>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup>
+    <OutDir>$(ProjectDir)..\dist\</OutDir>
+    <IntDir>$(ProjectDir)obj\$(Configuration)\</IntDir>
+  </PropertyGroup>
+  <!-- Win7 配置：使用 Win7 復活座標 -->
+  <PropertyGroup Condition="'$(Configuration)'=='Release_Win7'">
+    <OutDir>$(ProjectDir)..\dist\win7\</OutDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>false</SDLCheck>
+      <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;WINVER=0x0601;_WIN32_WINNT=0x0601;_CRT_SECURE_NO_WARNINGS;_USING_V110_SDK71_;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <!-- ✅ 靜態連結：無需 VCRUNTIME140.dll -->
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
+      <AdditionalOptions>/utf-8  /wd28159 /wd4819 %(AdditionalOptions)</AdditionalOptions>
+      <DebugInformationFormat Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">ProgramDatabase</DebugInformationFormat>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)imgui;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <EntryPointSymbol>mainCRTStartup</EntryPointSymbol>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <EnableUAC>false</EnableUAC>
+      <!-- ✅ Win7 最小版本：5.01 = Windows XP / Server 2003 SP1 -->
+      <MinimumRequiredVersion>5.01</MinimumRequiredVersion>
+      <!-- 靜態連結 + Winsock -->
+      <AdditionalDependencies>
+        psapi.lib;user32.lib;kernel32.lib;winmm.lib;gdi32.lib;ws2_32.lib;advapi32.lib;wininet.lib;shlwapi.lib;
+        %(AdditionalDependencies)
+      </AdditionalDependencies>
+      <IgnoreAllDefaultLibraries>false</IgnoreAllDefaultLibraries>
+    </Link>
+  </ItemDefinitionGroup>
+  <!-- Win7 編譯群組：啟用 Win7 座標 -->
+  <ItemDefinitionGroup Condition="'$(Configuration)'=='Release_Win7'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>false</SDLCheck>
+      <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;WINVER=0x0601;_WIN32_WINNT=0x0601;_CRT_SECURE_NO_WARNINGS;_USING_V110_SDK71_;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
+      <AdditionalOptions>/utf-8  /wd28159 /wd4819 %(AdditionalOptions)</AdditionalOptions>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)imgui;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <EntryPointSymbol>mainCRTStartup</EntryPointSymbol>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <EnableUAC>false</EnableUAC>
+      <MinimumRequiredVersion>5.01</MinimumRequiredVersion>
+      <AdditionalDependencies>
+        psapi.lib;user32.lib;kernel32.lib;winmm.lib;gdi32.lib;ws2_32.lib;advapi32.lib;wininet.lib;shlwapi.lib;
+        %(AdditionalDependencies)
+      </AdditionalDependencies>
+      <IgnoreAllDefaultLibraries>false</IgnoreAllDefaultLibraries>
+    </Link>
+  </ItemDefinitionGroup>
+  <!-- 核心 C++ 檔 -->
+  <ItemGroup>
+    <ClCompile Include="attack_packet.cpp" />
+    <ClCompile Include="bot_logic.cpp" />
+    <ClCompile Include="screenshot.cpp" />
+    <ClCompile Include="game_process.cpp" />
+    <ClCompile Include="input_sender.cpp" />
+    <ClCompile Include="main.cpp" />
+    <ClCompile Include="memory_reader.cpp" />
+    <ClCompile Include="offline_license.cpp" />
+    <ClCompile Include="offset_config.cpp" />
+    <ClCompile Include="config_updater.cpp" />
+    <ClCompile Include="nethook_shmem.cpp" />
+    <ClCompile Include="target_lock.cpp" />
+    <ClCompile Include="screenshot_assist.cpp" />
+    <ClCompile Include="coord_calib.cpp" />
+    <ClCompile Include="visionentity.cpp" />
+  </ItemGroup>
+  <!-- 核心 -->
+  <ItemGroup>
+    <ClCompile Include="gui_ranbot.cpp" />
+  </ItemGroup>
+  <!-- ImGui 庫 -->
+  <ItemGroup>
+    <ClCompile Include="imgui\imgui.cpp" />
+    <ClCompile Include="imgui\imgui_draw.cpp" />
+    <ClCompile Include="imgui\imgui_tables.cpp" />
+    <ClCompile Include="imgui\imgui_widgets.cpp" />
+    <ClCompile Include="imgui\imgui_impl_dx9.cpp" />
+    <ClCompile Include="imgui\imgui_impl_win32.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="gui_ranbot.h" />
+    <ClInclude Include="screenshot.h" />
+  </ItemGroup>
+  <!-- NetHook / packet hook 已停用，保留純外部讀取路徑 -->
+  <!-- 現有頭文件 -->
+  <ItemGroup>
+    <ClInclude Include="attack_packet.h" />
+    <ClInclude Include="bot_logic.h" />
+    <ClInclude Include="coords.h" />
+    <ClInclude Include="game_process.h" />
+    <ClInclude Include="input_sender.h" />
+    <ClInclude Include="memory_reader.h" />
+    <ClInclude Include="offline_license.h" />
+    <ClInclude Include="offset_config.h" />
+    <ClInclude Include="config_updater.h" />
+    <ClInclude Include="offsets.h" />
+    <ClInclude Include="win32_helpers.h" />
+    <ClInclude Include="nethook_shmem.h" />
+    <ClInclude Include="screenshot_assist.h" />
+    <ClInclude Include="visionentity.h" />
+    <ClInclude Include="embedded_images.h" />
+    <ClInclude Include="resource.h" />
+  </ItemGroup>
+  <!-- 應用程式圖示資源 -->
+  <ItemGroup>
+    <ResourceCompile Include="app.rc" />
+    <Image Include="app.ico" />
+  </ItemGroup>
+  <!-- 圖片已嵌入到 exe (embedded_images.h)，無需複製到輸出目錄 -->
+  <ItemGroup>
+    <Manifest Include="JyTrainer.manifest" />
+  </ItemGroup>
+  <!-- encrypt_offsets.cpp 是獨立開發者工具，不包含在主項目中 -->
+  <!-- 編譯方式：cl /EHsc /O2 encrypt_offsets.cpp advapi32.lib -->
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>
