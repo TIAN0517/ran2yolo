@@ -1,13 +1,24 @@
 #pragma once
 // ============================================================
 // ONNX Runtime 動態載入器 (Win7~Win11 通用)
-// 避免靜態 link 導致 Win7 載入失敗
+// 支援 x86 和 x64 自動偵測
 // ============================================================
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
 #include <string>
+
+// ============================================================
+// 偵測當前進程架構
+// ============================================================
+#ifdef _WIN64
+    #define ONNX_ARCH x64
+    #define ONNX_ARCH_STR "x64"
+#else
+    #define ONNX_ARCH x86
+    #define ONNX_ARCH_STR "x86"
+#endif
 
 // ============================================================
 // ONNX Runtime C API 指標類型
@@ -92,57 +103,58 @@ typedef void (*OrtReleaseRunOptionsFn)(OrtRunOptions*);
 typedef OrtStatus* (*OrtRunOptionsSetRunLogSeverityFn)(OrtRunOptions*, int);
 
 // ============================================================
-// ONNX Runtime 載入器
+// ONNX Runtime 載入器 (自動偵測架構)
 // ============================================================
 class OnnxLoader {
 public:
-    OnnxLoader() : m_dll(NULL), m_loaded(false) {}
+    OnnxLoader() : m_dll(NULL), m_loaded(false), m_arch(ONNX_ARCH) {}
 
     ~OnnxLoader() { Unload(); }
 
-    // 載入 ONNX Runtime DLL
+    // 載入 ONNX Runtime DLL (自動偵測架構)
     bool Load(const char* modelDir = NULL) {
         if (m_loaded) return true;
         Unload();
 
-        const char* dllNames[] = {
-            "onnxruntime.dll",
-            "..\\onnxruntime-win-x64-1.17.3\\onnxruntime.dll"
-        };
+        // 根據架構選擇 DLL 名稱
+        const char* dllName = (m_arch == x86) ? "onnxruntime.dll" : "onnxruntime.dll";
 
+        // 搜尋路徑列表 (根據架構優先)
         const char* searchPaths[] = {
-            "",
-            modelDir ? modelDir : "",
+            "",                          // 同目錄
             ".\\",
-            "..\\",
             "models\\",
-            ".\\onnxruntime-win-x64-1.17.3\\",
-            "..\\onnxruntime-win-x64-1.17.3\\"
+            ".\\onnxruntime\\",
+            "..\\onnxruntime\\",
+            ".\\onnxruntime-x86\\",     // x86 專用目錄
+            "..\\onnxruntime-x86\\",
+            ".\\onnxruntime-x64\\",     // x64 專用目錄
+            "..\\onnxruntime-x64\\",
         };
 
-        bool found = false;
-        for (int p = 0; p < 2 && !found; p++) {
-            for (int s = 0; s < 7 && !found; s++) {
-                std::string dllPath = searchPaths[s];
-                if (!dllPath.empty() && dllPath.back() != '\\' && dllPath.back() != '/') {
-                    dllPath += "\\";
-                }
-                std::string fullPath = dllPath + dllNames[p];
-                m_dll = LoadLibraryA(fullPath.c_str());
-                if (m_dll) found = true;
-            }
+        HMODULE foundDll = NULL;
+
+        // 嘗試載入
+        for (int s = 0; s < 9 && !foundDll; s++) {
+            std::string fullPath = std::string(searchPaths[s]) + dllName;
+            foundDll = LoadLibraryA(fullPath.c_str());
         }
 
-        if (!found) {
-            m_dll = GetModuleHandleA("onnxruntime.dll");
-            if (m_dll) found = true;
+        // 如果沒找到，嘗試系統搜尋
+        if (!foundDll) {
+            foundDll = GetModuleHandleA(dllName);
         }
 
-        if (!found) {
-            printf("[OnnxLoader] ONNX Runtime DLL not found, YOLO disabled\n");
+        if (!foundDll) {
+            printf("[OnnxLoader] ONNX Runtime DLL not found (arch: %s)\n", ONNX_ARCH_STR);
+            printf("[OnnxLoader] Please run setup_onnx_runtime.ps1 to download ONNX Runtime\n");
+            printf("[OnnxLoader] URL: https://github.com/microsoft/onnxruntime/releases\n");
             return false;
         }
 
+        m_dll = foundDll;
+
+        // 載入函數指標
         #define LOAD_PROC(type, name) \
             name = (type)GetProcAddress(m_dll, #name); \
             if (!name) { printf("[OnnxLoader] Missing export: " #name "\n"); Unload(); return false; }
@@ -184,7 +196,7 @@ public:
         #undef LOAD_PROC
 
         m_loaded = true;
-        printf("[OnnxLoader] ONNX Runtime loaded successfully\n");
+        printf("[OnnxLoader] ONNX Runtime loaded (arch: %s)\n", ONNX_ARCH_STR);
         return true;
     }
 
@@ -234,6 +246,7 @@ public:
     }
 
     bool IsLoaded() const { return m_loaded; }
+    const char* GetArch() const { return ONNX_ARCH_STR; }
 
     // 函數指標
     OrtCreateEnvFn OrtCreateEnv = nullptr;
@@ -271,8 +284,10 @@ public:
     OrtRunOptionsSetRunLogSeverityFn OrtRunOptionsSetRunLogSeverity = nullptr;
 
 private:
+    enum Arch { x86, x64 };
     HMODULE m_dll;
     bool m_loaded;
+    Arch m_arch;
 };
 
 // ============================================================
