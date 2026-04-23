@@ -88,10 +88,21 @@ HDC CaptureWindowClient(HWND hWnd, HDC* outMemDC, HBITMAP* outBitmap, int* outW,
 
     // 方法1 (首選): PrintWindow - 對 D3D9 視窗模式最有效
     // D3D9 渲染到 GPU 後台緩衝，GetDC/BitBlt 無法捕到，PrintWindow 可以
+    // Win7 Aero: 需要更多重試次數和等待時間
     BOOL ok = FALSE;
-    for (int retry = 0; retry < 3 && !ok; retry++) {
-        if (retry > 0) Sleep(5);  // 等待渲染完成
+    const int maxRetries = 5;
+    const int retryDelayMs = 15;
+    for (int retry = 0; retry < maxRetries && !ok; retry++) {
+        if (retry > 0) {
+            // Win7 Aero: 強制重繪並等待 GPU 完成 Present()
+            InvalidateRect(hWnd, NULL, FALSE);
+            UpdateWindow(hWnd);
+            Sleep(retryDelayMs);  // 等待渲染完成
+        }
         ok = PrintWindow(hWnd, hdcMem, PW_CLIENTONLY);
+        if (!ok && retry < maxRetries - 1) {
+            Sleep(retryDelayMs);  // 重試前等待
+        }
     }
 
     // 方法2 (fallback): GetDCEx + BitBlt（對 GDI 遊戲有效）
@@ -322,7 +333,7 @@ bool SaveCalibrationScreenshot(HWND hWnd, const char* phaseName, const POINT* ma
 
             wchar_t wbuf[64] = {0};
             MultiByteToWideChar(CP_ACP, 0, label, -1, wbuf, 64);
-            TextOutW(hdcMem, x + 15, y - 18, wbuf, wcslen(wbuf));
+            TextOutW(hdcMem, x + 15, y - 18, wbuf, (int)wcslen(wbuf));
 
             SelectObject(hdcMem, hOldFont);
             DeleteObject(hFont);

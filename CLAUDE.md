@@ -2,17 +2,22 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## 分支說明
+
+**Win11 branch** (`JyTrainer_Win11`): 保留 Win7/Win11 雙平台支援的原始碼。
+**main branch**: 已清理的 Win7-only 版本。
+
 ## 專案概述
 
 **JyTrainer** - Ran2 Online 外部 Trainer（獨立進程，非注入）。透過 `FindWindow` + `OpenProcess` + `ReadProcessMemory` 讀取遊戲記憶體，ImGui + DirectX 9 渲染 UI。
 
 ## 編譯
 
-```batch
-_build.bat              # Release x86 建置
-_build_quick.bat        # 使用 vcvarsall x86（環境變數版）
-_build_license_admin.bat # 授權管理工具
-```
+| 批次檔 | 說明 |
+|--------|------|
+| `_build.bat` | Release x86 建置（完整路徑 MSBuild） |
+| `_build_quick.bat` | 使用 vcvarsall 環境變數版建置 |
+| `_build_license_admin.bat` | 授權管理工具獨立建置 |
 
 - 工具鏈：v142 (VS2022)
 - 輸出：`../dist/JyTrainer.exe`（靜態 CRT）
@@ -44,19 +49,15 @@ main()
 | `gui_ranbot.cpp/h` | ImGui DX9 UI 渲染 |
 | `offsets.h` | 遊戲偏移（RVA 格式，+GameBase 使用） |
 | `offset_config.cpp/h` | 偏移配置管理（.dat/.ini 載入） |
-| `config_updater.cpp/h` | 遠端配置更新 |
 | `attack_packet.cpp/h` | 攻擊封包發送器（Winsock）|
 | `nethook_shmem.cpp/h` | NetHook 共享記憶體客戶端 (`Local\RanBot_NetHook`) |
 | `coords.h` | 座標定義（復活點、NPC 等）|
-| `visionentity.cpp/h` | 視覺實體掃描（像素血條）|
-| `visionentity.cpp/h` | 視覺實體掃描（像素掃描取代記憶體讀取）|
 | `coord_calib.cpp/h` | 座標校正 |
 | `target_lock.cpp/h` | 目標鎖定 |
-| `screenshot.cpp/h` | 螢幕截圖功能 |
-| `screenshot_assist.cpp/h` | 截圖輔助工具 |
+| `screenshot.cpp/h` | 螢幕截圖功能（PrintWindow + GetPixel）|
+| `visionentity.cpp/h` | 視覺實體掃描（像素血條 + YOLO ONNX）|
 | `offline_license.cpp/h` | 離線授權管理 |
-| `license_admin.cpp/h` | 授權管理工具（獨立建置）|
-| `kami_client.cpp/h` | 卡密驗證客戶端 |
+| `license_admin.cpp/h` | 授權管理工具 |
 
 ## Bot FSM
 
@@ -77,7 +78,6 @@ IDLE → HUNTING → DEAD → RETURNING → TOWN_SUPPLY → BACK_TO_FIELD → HU
 | `RETURNING` | 返回城鎮（按起點卡）|
 | `TOWN_SUPPLY` | 城鎮補給（由 `s_supplyPhase` 0-4 控制子流程）|
 | `BACK_TO_FIELD` | 返回野外（按前點卡）|
-| `TRAVELING` | [未實現] 移動中 |
 | `PAUSED` | 安全碼偵測時強制暫停 |
 
 ### TOWN_SUPPLY 子狀態 (`s_supplyPhase`)
@@ -96,19 +96,18 @@ Bot FSM 內部的戰鬥狀態機：
 
 ```
 SEEKING (0) → ENGAGING (1) → LOOTING (2) → SEEKING
-     ↑                                            ↓
-     └────────────────────────────────────────────┘
 ```
 
 - **SEEKING**: 尋找目標中
-- **ENGAGING**: 已在攻擊範圍，施放技能中
+- **ENGAGING**: 已在攻擊範圍，施放技能中（12秒 HP 無下降放棄）
 - **LOOTING**: 目標死亡，等待撿物品
 
 ## 實體讀取策略
 
 1. **優先**：NetHook 共享記憶體 (`Local\RanBot_NetHook`) - 從 recv() hook 讀取
 2. **視覺模式**：`use_visual_mode=true` 時使用 visionentity.cpp 像素掃描血條
-3. **已知限制**：EntityPool TLS 依賴，外部無法直接讀取
+3. **YOLO 模式**：`models/best.onnx` ONNX 模型視覺識別
+4. **已知限制**：EntityPool TLS 依賴，外部無法直接讀取
 
 ## 實體結構 (`Entity`)
 
@@ -139,33 +138,14 @@ struct Entity {
 3. `corrected_offsets.ini` (修正版本)
 4. 內建預設值（offsets.h）
 
-### 加密格式
-
-```
-[Magic: 4 bytes] "JYOF"
-[Version: 2 bytes] 0x0001
-[Flags: 2 bytes] reserved
-[IV: 16 bytes] AES CBC IV
-[DataSize: 4 bytes] 明文大小
-[EncryptedData: N bytes] AES-256-CBC + PKCS7
-[Checksum: 4 bytes] CRC32
-```
-
-### 使用方式
-
 使用 `OffsetConfig::` 命名空間的全域 getter 函式，而非直接使用 `Offsets::`（編譯期常量）。
-
-```cpp
-DWORD hp = SafeRPM<DWORD>(gh.hProcess, gh.baseAddr + OffsetConfig::PlayerHP());
-```
 
 ### 偏移格式說明
 
 - **RVA (Relative Virtual Address)**：相對於模組載入基底的偏移
 - **地址公式**：`實際地址 = GameBase + RVA`
 - **IDA → CE 轉換**：`CE = IDA_RVA + 0xBD0000`
-- **IDA 基址**：0x400000
-- **CE 基址**：0xFD0000（實際載入位置）
+- **IDA 基址**：0x400000，**CE 基址**：0xFD0000
 
 ## 授權系統
 

@@ -2,7 +2,7 @@
 
 // 建議此檔儲存為 UTF-8 with BOM
 // 座標系統：統一使用 1024x768 作為遊戲內基準座標
-// Win11/Win7 差異由用戶校準系統自動覆寫
+// 純 Win7 版本，無平台檢測
 
 #include <windows.h>
 
@@ -26,47 +26,6 @@ namespace Coords
     // ============================================================
     static constexpr int GAME_W = 1024;
     static constexpr int GAME_H = 768;
-
-    // ============================================================
-    // 執行時 Windows 版本檢測（Win7/Win11 自動切換）
-    // ============================================================
-    inline bool IsWin11() {
-        static bool s_isWin11 = []() {
-            OSVERSIONINFOW osvi = {};
-            osvi.dwOSVersionInfoSize = sizeof(OSVERSIONINFOW);
-
-            HMODULE hNtDll = GetModuleHandleW(L"ntdll.dll");
-            if (hNtDll) {
-                typedef LONG(WINAPI* RtlGetVersionPtr)(OSVERSIONINFOW*);
-                RtlGetVersionPtr rtlGetVersion = reinterpret_cast<RtlGetVersionPtr>(
-                    GetProcAddress(hNtDll, "RtlGetVersion"));
-                if (rtlGetVersion && rtlGetVersion(&osvi) == 0) {
-                    // Win11: dwMajorVersion=10 且 dwBuildNumber>=22000
-                    if (osvi.dwMajorVersion == 10 && osvi.dwBuildNumber >= 22000) {
-                        return true;
-                    }
-                    return false;
-                }
-            }
-            // Fallback: 用 GetVersionEx（可能被 SDK 模擬，但精確度較低）
-            #pragma warning(push)
-            #pragma warning(disable: 4996)
-            OSVERSIONINFOW osviFallback = {};
-            osviFallback.dwOSVersionInfoSize = sizeof(OSVERSIONINFOW);
-            if (GetVersionExW(&osviFallback)) {
-                if (osviFallback.dwMajorVersion == 10 && osviFallback.dwBuildNumber >= 22000) {
-                    return true;
-                }
-            }
-            #pragma warning(pop)
-            return false;
-        }();
-        return s_isWin11;
-    }
-
-    inline bool IsWin7() {
-        return !IsWin11();
-    }
 
     // ============================================================
     // 座標轉換：相對座標 → 實際像素
@@ -117,53 +76,23 @@ namespace Coords
     static constexpr Point 右下 = Point(1000, 740);
 
     // ============================================================
-    // 復活相關（遊戲內絕對座標 1024x768）
-    // 預設值：Win11/Win7 通用
-    // 如有差異，由用戶校準系統覆寫
+    // 復活相關（Win7 實測座標）
     // ============================================================
-
-    // ---------- Win11 預設 ----------
-    static constexpr Point 復活按鈕_WIN11 = Point(454, 408);
-    static constexpr Point 歸魂珠復活_WIN11 = Point(572, 407);
-    static constexpr Point 基本復活_WIN11 = Point(513, 407);
-
-    // ---------- Win7 預設 ----------
-    static constexpr Point 歸魂珠復活_WIN7 = Point(580, 400);
-    static constexpr Point 復活按鈕_WIN7 = Point(520, 400);
-    static constexpr Point 基本復活_WIN7 = Point(520, 400);
-
-    inline Point 復活按鈕() { return IsWin11() ? 復活按鈕_WIN11 : 復活按鈕_WIN7; }
-    inline Point 歸魂珠復活() { return IsWin11() ? 歸魂珠復活_WIN11 : 歸魂珠復活_WIN7; }
-    inline Point 基本復活() { return IsWin11() ? 基本復活_WIN11 : 基本復活_WIN7; }
+    static constexpr Point 歸魂珠復活 = Point(580, 400);
+    static constexpr Point 復活按鈕 = Point(520, 400);
+    static constexpr Point 基本復活 = Point(520, 400);
 
     // ============================================================
-    // 聖門 NPC
+    // 聖門 NPC（Win7 實測座標）
     // ============================================================
     static constexpr Point NPC聖門特派員詹姆士 = Point(577, 140);
     static constexpr Point NPC聖門對話框購買物品 = Point(573, 398);
-
-    // ---------- Win11 ----------
-    static constexpr Point NPC聖門箭矢_WIN11 = Point(549, 251);
-    static constexpr Point NPC聖門符咒_WIN11 = Point(627, 251);
-    static constexpr Point NPC聖門消耗品_WIN11 = Point(699, 253);
-    static constexpr Point NPC聖門消耗品數量框_WIN11 = Point(412, 417);
-    static constexpr Point NPC聖門箭矢購買確認_WIN11 = Point(530, 416);
-    static constexpr Point NPC聖門消耗品購買確認_WIN11 = Point(530, 418);
-
-    // ---------- Win7 ----------
-    static constexpr Point NPC聖門箭矢_WIN7 = Point(723, 175);
-    static constexpr Point NPC聖門符咒_WIN7 = Point(563, 244);
-    static constexpr Point NPC聖門消耗品_WIN7 = Point(640, 243);
-    static constexpr Point NPC聖門消耗品數量框_WIN7 = Point(712, 247);
-    static constexpr Point NPC聖門箭矢購買確認_WIN7 = Point(585, 389);
-    static constexpr Point NPC聖門消耗品購買確認_WIN7 = Point(530, 414);
-
-    inline Point NPC聖門箭矢() { return IsWin11() ? NPC聖門箭矢_WIN11 : NPC聖門箭矢_WIN7; }
-    inline Point NPC聖門符咒() { return IsWin11() ? NPC聖門符咒_WIN11 : NPC聖門符咒_WIN7; }
-    inline Point NPC聖門消耗品() { return IsWin11() ? NPC聖門消耗品_WIN11 : NPC聖門消耗品_WIN7; }
-    inline Point NPC聖門消耗品數量框() { return IsWin11() ? NPC聖門消耗品數量框_WIN11 : NPC聖門消耗品數量框_WIN7; }
-    inline Point NPC聖門箭矢購買確認() { return IsWin11() ? NPC聖門箭矢購買確認_WIN11 : NPC聖門箭矢購買確認_WIN7; }
-    inline Point NPC聖門消耗品購買確認() { return IsWin11() ? NPC聖門消耗品購買確認_WIN11 : NPC聖門消耗品購買確認_WIN7; }
+    static constexpr Point NPC聖門箭矢 = Point(723, 175);
+    static constexpr Point NPC聖門符咒 = Point(563, 244);
+    static constexpr Point NPC聖門消耗品 = Point(640, 243);
+    static constexpr Point NPC聖門消耗品數量框 = Point(712, 247);
+    static constexpr Point NPC聖門箭矢購買確認 = Point(585, 389);
+    static constexpr Point NPC聖門消耗品購買確認 = Point(530, 414);
 
     // 商店格子
     static constexpr Point 聖門商店左上第一格 = Point(534, 285);
@@ -177,120 +106,62 @@ namespace Coords
     static constexpr Point 聖門背包右下角第一格 = Point(950, 513);
 
     // ============================================================
-    // 商洞 NPC
+    // 商洞 NPC（Win7 實測座標）
     // ============================================================
-    static constexpr Point NPC商洞特派員詹姆士_WIN11 = Point(612, 288);
-    static constexpr Point NPC商洞特派員詹姆士_FAR_WIN11 = Point(835, 109);
-    static constexpr Point NPC商洞特派員詹姆士_WIN7 = Point(630, 295);
-    static constexpr Point NPC商洞特派員詹姆士_FAR_WIN7 = Point(848, 172);
-
-    inline Point NPC商洞特派員詹姆士() { return IsWin11() ? NPC商洞特派員詹姆士_WIN11 : NPC商洞特派員詹姆士_WIN7; }
-    inline Point NPC商洞特派員詹姆士_FAR() { return IsWin11() ? NPC商洞特派員詹姆士_FAR_WIN11 : NPC商洞特派員詹姆士_FAR_WIN7; }
+    static constexpr Point NPC商洞特派員詹姆士 = Point(630, 295);
+    static constexpr Point NPC商洞特派員詹姆士_FAR = Point(848, 172);
 
     // ============================================================
-    // 玄巖 NPC
+    // 玄巖 NPC（Win7 實測座標）
     // ============================================================
-    static constexpr Point NPC玄巖特派員詹姆士_WIN11 = Point(540, 200);
-    static constexpr Point NPC玄巖特派員詹姆士_WIN7 = Point(585, 207);
-    static constexpr Point NPC玄巖對話框購買物品_WIN11 = Point(576, 396);
-    static constexpr Point NPC玄巖對話框購買物品_WIN7 = Point(587, 396);
-    static constexpr Point NPC玄巖箭矢_WIN11 = Point(554, 252);
-    static constexpr Point NPC玄巖符咒_WIN11 = Point(630, 252);
-    static constexpr Point NPC玄巖消耗品_WIN11 = Point(701, 252);
-    static constexpr Point NPC玄巖箭矢_WIN7 = Point(565, 252);
-    static constexpr Point NPC玄巖符咒_WIN7 = Point(641, 252);
-    static constexpr Point NPC玄巖消耗品_WIN7 = Point(712, 252);
-
-    inline Point NPC玄巖特派員詹姆士() { return IsWin11() ? NPC玄巖特派員詹姆士_WIN11 : NPC玄巖特派員詹姆士_WIN7; }
-    inline Point NPC玄巖對話框購買物品() { return IsWin11() ? NPC玄巖對話框購買物品_WIN11 : NPC玄巖對話框購買物品_WIN7; }
-    inline Point NPC玄巖箭矢() { return IsWin11() ? NPC玄巖箭矢_WIN11 : NPC玄巖箭矢_WIN7; }
-    inline Point NPC玄巖符咒() { return IsWin11() ? NPC玄巖符咒_WIN11 : NPC玄巖符咒_WIN7; }
-    inline Point NPC玄巖消耗品() { return IsWin11() ? NPC玄巖消耗品_WIN11 : NPC玄巖消耗品_WIN7; }
+    static constexpr Point NPC玄巖特派員詹姆士 = Point(585, 207);
+    static constexpr Point NPC玄巖對話框購買物品 = Point(587, 396);
+    static constexpr Point NPC玄巖箭矢 = Point(565, 252);
+    static constexpr Point NPC玄巖符咒 = Point(641, 252);
+    static constexpr Point NPC玄巖消耗品 = Point(712, 252);
 
     // ============================================================
-    // 鳳凰 NPC
+    // 鳳凰 NPC（Win7 實測座標）
     // ============================================================
-    static constexpr Point NPC鳳凰特派員詹姆士_WIN11 = Point(516, 316);
-    static constexpr Point NPC鳳凰特派員詹姆士_WIN7 = Point(568, 247);
-    static constexpr Point NPC鳳凰對話框購買物品_WIN11 = Point(575, 396);
-    static constexpr Point NPC鳳凰對話框購買物品_WIN7 = Point(586, 396);
-
-    inline Point NPC鳳凰特派員詹姆士() { return IsWin11() ? NPC鳳凰特派員詹姆士_WIN11 : NPC鳳凰特派員詹姆士_WIN7; }
-    inline Point NPC鳳凰對話框購買物品() { return IsWin11() ? NPC鳳凰對話框購買物品_WIN11 : NPC鳳凰對話框購買物品_WIN7; }
+    static constexpr Point NPC鳳凰特派員詹姆士 = Point(568, 247);
+    static constexpr Point NPC鳳凰對話框購買物品 = Point(586, 396);
 
     // ============================================================
-    // 賣物資按鈕
+    // 賣物資按鈕（Win7 實測座標）
     // ============================================================
-    static constexpr Point NPC賣物資_WIN11 = Point(300, 350);
-    static constexpr Point NPC賣物資_WIN7 = Point(305, 355);
-    static constexpr Point NPC賣物資選擇是按鈕_WIN11 = Point(300, 400);
-    static constexpr Point NPC賣物資選擇是按鈕_WIN7 = Point(305, 405);
-
-    inline Point GetNPCSellItemPos() { return IsWin11() ? NPC賣物資_WIN11 : NPC賣物資_WIN7; }
-    inline Point GetNPCSellConfirmPos() { return IsWin11() ? NPC賣物資選擇是按鈕_WIN11 : NPC賣物資選擇是按鈕_WIN7; }
+    static constexpr Point NPC賣物資 = Point(305, 355);
+    static constexpr Point NPC賣物資選擇是按鈕 = Point(305, 405);
 
     // ============================================================
-    // 寵物餵食
+    // 寵物餵食（Win7 實測座標）
     // ============================================================
-    static constexpr Point 寵物卡_WIN11 = Point(774, 190);
-    static constexpr Point 飼料_WIN11 = Point(810, 188);
-    static constexpr Point 寵物卡_WIN7 = Point(775, 180);
-    static constexpr Point 飼料_WIN7 = Point(820, 180);
-
-    inline Point 寵物卡() { return IsWin11() ? 寵物卡_WIN11 : 寵物卡_WIN7; }
-    inline Point 飼料() { return IsWin11() ? 飼料_WIN11 : 飼料_WIN7; }
+    static constexpr Point 寵物卡 = Point(775, 180);
+    static constexpr Point 飼料 = Point(820, 180);
 
     // ============================================================
-    // 戰鬥圓心 / 固定掃打點（Win11）
+    // 戰鬥圓心 / 固定掃打點（Win7 實測座標）
     // ============================================================
-    static constexpr Point 中心點_WIN11 = Point(500, 370);
-    static constexpr ScanPoint 點01_WIN11 = ScanPoint(472, 345);
-    static constexpr ScanPoint 點02_WIN11 = ScanPoint(446, 359);
-    static constexpr ScanPoint 點03_WIN11 = ScanPoint(462, 423);
-    static constexpr ScanPoint 點04_WIN11 = ScanPoint(526, 432);
-    static constexpr ScanPoint 點05_WIN11 = ScanPoint(556, 394);
-    static constexpr ScanPoint 點06_WIN11 = ScanPoint(565, 381);
-    static constexpr ScanPoint 點07_WIN11 = ScanPoint(549, 315);
-    static constexpr ScanPoint 點08_WIN11 = ScanPoint(506, 325);
-
-    // Win7（用戶實測）
-    static constexpr Point 中心點_WIN7 = Point(520, 390);
-    static constexpr ScanPoint 點01_WIN7 = ScanPoint(492, 365);
-    static constexpr ScanPoint 點02_WIN7 = ScanPoint(466, 379);
-    static constexpr ScanPoint 點03_WIN7 = ScanPoint(482, 443);
-    static constexpr ScanPoint 點04_WIN7 = ScanPoint(546, 452);
-    static constexpr ScanPoint 點05_WIN7 = ScanPoint(576, 414);
-    static constexpr ScanPoint 點06_WIN7 = ScanPoint(585, 401);
-    static constexpr ScanPoint 點07_WIN7 = ScanPoint(569, 335);
-    static constexpr ScanPoint 點08_WIN7 = ScanPoint(526, 345);
-
-    inline Point 中心點() { return IsWin11() ? 中心點_WIN11 : 中心點_WIN7; }
-    inline ScanPoint 點01() { return IsWin11() ? 點01_WIN11 : 點01_WIN7; }
-    inline ScanPoint 點02() { return IsWin11() ? 點02_WIN11 : 點02_WIN7; }
-    inline ScanPoint 點03() { return IsWin11() ? 點03_WIN11 : 點03_WIN7; }
-    inline ScanPoint 點04() { return IsWin11() ? 點04_WIN11 : 點04_WIN7; }
-    inline ScanPoint 點05() { return IsWin11() ? 點05_WIN11 : 點05_WIN7; }
-    inline ScanPoint 點06() { return IsWin11() ? 點06_WIN11 : 點06_WIN7; }
-    inline ScanPoint 點07() { return IsWin11() ? 點07_WIN11 : 點07_WIN7; }
-    inline ScanPoint 點08() { return IsWin11() ? 點08_WIN11 : 點08_WIN7; }
+    static constexpr Point 中心點 = Point(520, 390);
+    static constexpr ScanPoint 點01 = ScanPoint(492, 365);
+    static constexpr ScanPoint 點02 = ScanPoint(466, 379);
+    static constexpr ScanPoint 點03 = ScanPoint(482, 443);
+    static constexpr ScanPoint 點04 = ScanPoint(546, 452);
+    static constexpr ScanPoint 點05 = ScanPoint(576, 414);
+    static constexpr ScanPoint 點06 = ScanPoint(585, 401);
+    static constexpr ScanPoint 點07 = ScanPoint(569, 335);
+    static constexpr ScanPoint 點08 = ScanPoint(526, 345);
 
     // 攻擊掃描點
-    static constexpr ScanPoint AttackScanPoints_WIN11[] =
+    static constexpr ScanPoint AttackScanPoints[] =
     {
-        點01_WIN11, 點02_WIN11, 點03_WIN11, 點04_WIN11,
-        點05_WIN11, 點06_WIN11, 點07_WIN11, 點08_WIN11
-    };
-
-    static constexpr ScanPoint AttackScanPoints_WIN7[] =
-    {
-        點01_WIN7, 點02_WIN7, 點03_WIN7, 點04_WIN7,
-        點05_WIN7, 點06_WIN7, 點07_WIN7, 點08_WIN7
+        點01, 點02, 點03, 點04,
+        點05, 點06, 點07, 點08
     };
 
     static constexpr int ATTACK_SCAN_COUNT = 8;
 
     inline const ScanPoint* GetAttackScanPoints() {
-        return IsWin11() ? AttackScanPoints_WIN11 : AttackScanPoints_WIN7;
+        return AttackScanPoints;
     }
 
     // ============================================================
@@ -321,5 +192,21 @@ namespace Coords
         if (outW) *outW = rc.right;
         if (outH) *outH = rc.bottom;
         return true;
+    }
+
+    // 賣物品相關座標
+    inline Point GetNPCSellItemPos(int slotIndex = 0) {
+        // 背包物品位置（從左到右、從上到下）
+        static const Point itemSlots[] = {
+            Point(773, 191), Point(797, 191), Point(821, 191), Point(845, 191), Point(869, 191), Point(893, 191), Point(917, 191), Point(941, 191),
+            Point(773, 215), Point(797, 215), Point(821, 215), Point(845, 215), Point(869, 215), Point(893, 215), Point(917, 215), Point(941, 215),
+            Point(773, 239), Point(797, 239), Point(821, 239), Point(845, 239), Point(869, 239), Point(893, 239), Point(917, 239), Point(941, 239),
+        };
+        if (slotIndex < 0 || slotIndex >= 24) return Point(0, 0);
+        return itemSlots[slotIndex];
+    }
+
+    inline Point GetNPCSellConfirmPos() {
+        return Point(520, 414);
     }
 }

@@ -61,51 +61,45 @@ static_assert(sizeof(s_labels) / sizeof(s_labels[0]) == (size_t)CalibIndex::COUN
 // ============================================================
 static Coords::Point GetDefault(CalibIndex idx) {
     switch (idx) {
-        case CalibIndex::REVIVE_SOUL_PEARL:  return Coords::歸魂珠復活();
-        case CalibIndex::REVIVE原地:           return Coords::復活按鈕();
-        case CalibIndex::REVIVE_基本:          return Coords::基本復活();
+        case CalibIndex::REVIVE_SOUL_PEARL:  return Coords::歸魂珠復活;
+        case CalibIndex::REVIVE原地:           return Coords::復活按鈕;
+        case CalibIndex::REVIVE_基本:          return Coords::基本復活;
 
         case CalibIndex::NPC聖門_特派員:       return Coords::NPC聖門特派員詹姆士;
         case CalibIndex::NPC聖門_對話框購買:  return Coords::NPC聖門對話框購買物品;
-        case CalibIndex::NPC聖門_箭矢:        return Coords::NPC聖門箭矢();
-        case CalibIndex::NPC聖門_符咒:         return Coords::NPC聖門符咒();
-        case CalibIndex::NPC聖門_消耗品:       return Coords::NPC聖門消耗品();
-        case CalibIndex::NPC聖門_購買確認:     return Coords::NPC聖門箭矢購買確認();
+        case CalibIndex::NPC聖門_箭矢:        return Coords::NPC聖門箭矢;
+        case CalibIndex::NPC聖門_符咒:         return Coords::NPC聖門符咒;
+        case CalibIndex::NPC聖門_消耗品:       return Coords::NPC聖門消耗品;
+        case CalibIndex::NPC聖門_購買確認:     return Coords::NPC聖門箭矢購買確認;
 
-        case CalibIndex::NPC商洞_特派員:       return Coords::NPC商洞特派員詹姆士();
-        case CalibIndex::NPC商洞_特派員_FAR:   return Coords::NPC商洞特派員詹姆士_FAR();
+        case CalibIndex::NPC商洞_特派員:       return Coords::NPC商洞特派員詹姆士;
+        case CalibIndex::NPC商洞_特派員_FAR:   return Coords::NPC商洞特派員詹姆士_FAR;
 
-        case CalibIndex::NPC玄巖_特派員:       return Coords::NPC玄巖特派員詹姆士();
-        case CalibIndex::NPC玄巖_對話框購買:  return Coords::NPC玄巖對話框購買物品();
-        case CalibIndex::NPC玄巖_箭矢:        return Coords::NPC玄巖箭矢();
-        case CalibIndex::NPC玄巖_符咒:         return Coords::NPC玄巖符咒();
-        case CalibIndex::NPC玄巖_消耗品:       return Coords::NPC玄巖消耗品();
+        case CalibIndex::NPC玄巖_特派員:       return Coords::NPC玄巖特派員詹姆士;
+        case CalibIndex::NPC玄巖_對話框購買:  return Coords::NPC玄巖對話框購買物品;
+        case CalibIndex::NPC玄巖_箭矢:        return Coords::NPC玄巖箭矢;
+        case CalibIndex::NPC玄巖_符咒:         return Coords::NPC玄巖符咒;
+        case CalibIndex::NPC玄巖_消耗品:       return Coords::NPC玄巖消耗品;
 
-        case CalibIndex::NPC鳳凰_特派員:       return Coords::NPC鳳凰特派員詹姆士();
-        case CalibIndex::NPC鳳凰_對話框購買:  return Coords::NPC鳳凰對話框購買物品();
+        case CalibIndex::NPC鳳凰_特派員:       return Coords::NPC鳳凰特派員詹姆士;
+        case CalibIndex::NPC鳳凰_對話框購買:  return Coords::NPC鳳凰對話框購買物品;
 
-        case CalibIndex::PET_FOOD:             return Coords::飼料();
-        case CalibIndex::PET_TALISMAN:         return Coords::寵物卡();
+        case CalibIndex::PET_FOOD:             return Coords::飼料;
+        case CalibIndex::PET_TALISMAN:         return Coords::寵物卡;
 
-        case CalibIndex::CENTER_POINT:         return Coords::中心點();
+        case CalibIndex::CENTER_POINT:         return Coords::中心點;
 
-        case CalibIndex::SCAN_PT01:            return Coords::點01();
-        case CalibIndex::SCAN_PT02:            return Coords::點02();
-        case CalibIndex::SCAN_PT03:            return Coords::點03();
-        case CalibIndex::SCAN_PT04:            return Coords::點04();
-        case CalibIndex::SCAN_PT05:            return Coords::點05();
-        case CalibIndex::SCAN_PT06:            return Coords::點06();
-        case CalibIndex::SCAN_PT07:            return Coords::點07();
-        case CalibIndex::SCAN_PT08:            return Coords::點08();
+        case CalibIndex::SCAN_PT01:            return Coords::點01;
+        case CalibIndex::SCAN_PT02:            return Coords::點02;
+        case CalibIndex::SCAN_PT03:            return Coords::點03;
+        case CalibIndex::SCAN_PT04:            return Coords::點04;
+        case CalibIndex::SCAN_PT05:            return Coords::點05;
+        case CalibIndex::SCAN_PT06:            return Coords::點06;
+        case CalibIndex::SCAN_PT07:            return Coords::點07;
+        case CalibIndex::SCAN_PT08:            return Coords::點08;
 
         default: return Coords::Point(0, 0);
     }
-}
-
-static void SetDefault(CalibIndex idx, int rx, int rz) {
-    // 校正值寫入 coords.h 的方式是透過 m_overrides
-    // 這裡不做任何事，實際值由 CoordCalibrator 的 m_overrides 提供
-    (void)idx; (void)rx; (void)rz;
 }
 
 // ============================================================
@@ -215,6 +209,8 @@ void CoordCalibrator::ResetAll() {
 
 const char* CoordCalibrator::GetLabel(CalibIndex idx) const {
     int i = (int)idx;
+    // NONE = -1，其他從 0 開始
+    if (i == (int)CalibIndex::NONE) return "【未選擇】";
     if (i < 0 || i >= (int)CalibIndex::COUNT) return "???";
     return s_labels[i];
 }
