@@ -1,11 +1,135 @@
 // ============================================================
 // 視覺實體掃描模組（Win7~Win11 通用）
-// 純像素掃描取代記憶體讀取
+// 純像素掃描 + YOLO 物件偵測
 // ============================================================
 #include "visionentity.h"
 #include "screenshot.h"
 #include <vector>
 #include <cmath>
+
+// ============================================================
+// YOLO 偵測支援
+// ============================================================
+#ifdef USE_YOLO_DETECTION
+#include "yolo_detector.h"
+
+// YOLO 偵測器 (單例)
+static YoloDetector g_yolo;
+static bool g_yoloInited = false;
+static bool g_yoloFailed = false;
+
+// YOLO 初始化
+bool InitYoloDetector(const char* modelPath) {
+    if (g_yoloInited) return true;
+    if (g_yoloFailed) return false;
+
+    if (g_yolo.Init(modelPath)) {
+        g_yoloInited = true;
+        printf("[VisionEntity] YOLO detector initialized: %s\n", modelPath);
+        return true;
+    } else {
+        g_yoloFailed = true;
+        printf("[VisionEntity] YOLO detector failed to initialize\n");
+        return false;
+    }
+}
+
+bool InitYoloDetectorW(const wchar_t* modelPath) {
+    if (g_yoloInited) return true;
+    if (g_yoloFailed) return false;
+
+    if (g_yolo.Init(modelPath)) {
+        g_yoloInited = true;
+        printf("[VisionEntity] YOLO detector initialized (Unicode path)\n");
+        return true;
+    } else {
+        g_yoloFailed = true;
+        printf("[VisionEntity] YOLO detector failed to initialize\n");
+        return false;
+    }
+}
+
+bool IsYoloReady() {
+    return g_yoloInited && g_yolo.IsReady();
+}
+
+void DestroyYoloDetector() {
+    if (g_yoloInited) {
+        g_yolo.Destroy();
+        g_yoloInited = false;
+        g_yoloFailed = false;
+        printf("[VisionEntity] YOLO detector destroyed\n");
+    }
+}
+
+void SetYoloThresholds(float conf, float nms) {
+    if (g_yoloInited) {
+        g_yolo.SetConfidenceThreshold(conf);
+        g_yolo.SetNMSThreshold(nms);
+    }
+}
+
+float GetYoloInferenceTime() {
+    if (g_yoloInited) {
+        return g_yolo.GetLastInferenceTime();
+    }
+    return 0.0f;
+}
+
+// ============================================================
+// YOLO 掃描怪物
+// ============================================================
+int ScanYoloMonsters(HWND hWnd, VisualMonster* outMonsters, int maxMonsters,
+                    int gameW, int gameH) {
+    if (!g_yoloInited || !outMonsters || maxMonsters <= 0) {
+        return 0;
+    }
+
+    // 截圖
+    std::vector<uint8_t> pixels;
+    if (!CaptureGameWindow(hWnd, pixels, gameW, gameH)) {
+        return 0;
+    }
+
+    // YOLO 推論
+    std::vector<YoloBox> boxes;
+    int numBoxes = g_yolo.Detect(pixels.data(), gameW, gameH, boxes);
+    if (numBoxes <= 0) {
+        return 0;
+    }
+
+    // 轉換為 VisualMonster
+    int count = 0;
+    for (int i = 0; i < numBoxes && count < maxMonsters; i++) {
+        const YoloBox& box = boxes[i];
+
+        // 計算中心點
+        float centerX = (box.x1 + box.x2) * 0.5f;
+        float centerY = (box.y1 + box.y2) * 0.5f;
+
+        // 估算 HP 百分比 (從信心度推估)
+        int hpPct = (int)(box.confidence * 100);
+        if (hpPct > 100) hpPct = 100;
+
+        VisualMonster m;
+        m.screenX = (int)centerX;
+        m.screenY = (int)centerY;
+        m.relX = (int)(centerX * gameW / gameW);  // 假設截圖等於遊戲客戶區
+        m.relY = (int)(centerY * gameH / gameH);
+        m.hpPct = hpPct;
+        m.width = (int)(box.x2 - box.x1);
+        m.priority = (int)(centerY * 100 / gameH);  // 越下方優先級越高
+
+        outMonsters[count++] = m;
+    }
+
+    // 按優先級排序
+    SortVisualMonsters(outMonsters, count);
+
+    return count;
+}
+
+#endif // USE_YOLO_DETECTION
 
 // ============================================================
 // 血條識別參數
@@ -143,7 +267,7 @@ void SortVisualMonsters(VisualMonster* monsters, int count) {
 }
 
 // ============================================================
-// 掃描畫面所有怪物血條
+// 掃描畫面所有怪物血條 (整合 YOLO + 像素掃描)
 // ============================================================
 int ScanVisualMonsters(HWND hWnd, VisualMonster* outMonsters, int maxMonsters) {
     if (!hWnd || !outMonsters || maxMonsters <= 0) return 0;
@@ -154,7 +278,18 @@ int ScanVisualMonsters(HWND hWnd, VisualMonster* outMonsters, int maxMonsters) {
     int h = rc.bottom - rc.top;
     if (w <= 0 || h <= 0) return 0;
 
-    // 截圖
+#ifdef USE_YOLO_DETECTION
+    // 優先使用 YOLO 偵測
+    if (g_yoloInited) {
+        int count = ScanYoloMonsters(hWnd, outMonsters, maxMonsters, w, h);
+        if (count > 0) {
+            return count;
+        }
+        // YOLO 沒偵測到，使用像素掃描作為後備
+    }
+#endif
+
+    // 像素掃描 (原始邏輯)
     std::vector<uint8_t> pixels;
     if (!CaptureGameWindow(hWnd, pixels, w, h)) return 0;
 

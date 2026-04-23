@@ -135,4 +135,8 @@ namespace OffsetConfig {
     DWORD FuncPacketSend_RVA();     // Packet send
     DWORD FuncNPCBuySell_RVA();     // NPC buy/sell
     DWORD FuncPickupPacket_RVA();   // Pickup packet build
+
+    // --- YOLO 設定持久化（INI 格式）---
+    bool SaveYoloSettings(bool yoloMode, float confidence, int nmsThreshold);
+    bool LoadYoloSettings(bool* outYoloMode, float* outConfidence, int* outNmsThreshold);
 }

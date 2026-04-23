@@ -908,28 +908,81 @@ static void PageConfig() {
         ImGui::Spacing();
         UiEndPanel();
 
-        UiBeginPanel("CombatPanel2", 184.0f);
+        UiBeginPanel("CombatPanel2", 230.0f);
         UiSectionTitle("[ 戰鬥設定 ]");
         UiSliderInt("攻擊範圍 (格)", &attackRange, 1, 30);
         UiSliderInt("攻擊間隔 (ms)", &attackInterval, 50, 2000);
         UiCheckbox("自動撿物", &autoPickup);
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-        UiCheckbox("視覺模式 (Vision)", &useVisualMode);
-        if (useVisualMode) {
-            ImGui::TextColored(ImVec4(0.2f, 0.8f, 0.2f, 1.0f), "  視覺辨識為主，記憶體為輔");
-        } else {
-            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "  記憶體讀取為主（傳統模式）");
-        }
         if (autoPickup) {
             UiSliderInt("撿物範圍 (格)", &pickupRange, 1, 10);
         }
-        g_cfg.attack_range.store(attackRange);
-        g_cfg.attack_interval_ms.store(attackInterval);
-        g_cfg.pickup_range.store(pickupRange);
-        g_cfg.auto_pickup.store(autoPickup);
-        g_cfg.use_visual_mode.store(useVisualMode);
+        ImGui::Spacing();
+        UiEndPanel();
+
+        UiBeginPanel("VisionPanel", 270.0f);
+        UiSectionTitle("[ 視覺模式 ]");
+        // ── YOLO 模式 ──
+        extern bool GetYoloMode();
+        extern void SetYoloMode(bool enabled);
+        extern float GetYoloConfidence();
+        extern void SetYoloConfidence(float conf);
+        bool useYolo = GetYoloMode();
+        UiCheckbox("YOLO 模式", &useYolo);
+        if (useYolo) {
+            SetYoloMode(true);
+            ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.5f, 1.0f), "  ONNX 模型視覺辨識（與視覺模式互斥）");
+            ImGui::Spacing();
+            ImGui::Indent();
+            float conf = GetYoloConfidence();
+            ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.08f, 0.10f, 0.15f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(0.3f, 0.9f, 0.5f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ImVec4(0.4f, 1.0f, 0.6f, 1.0f));
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::SliderFloat("##YoloConf", &conf, 0.0f, 1.0f, "信心度: %.2f")) {
+                SetYoloConfidence(conf);
+            }
+            ImGui::PopStyleColor(3);
+            ImGui::Unindent();
+            // ── 寫入 INI（每幀檢查是否變更）──
+            static bool s_yoloChanged = false;
+            static bool s_lastYoloMode = false;
+            static float s_lastConf = 0.0f;
+            if (useYolo != s_lastYoloMode || fabs(conf - s_lastConf) > 0.01f) {
+                s_lastYoloMode = useYolo;
+                s_lastConf = conf;
+                s_yoloChanged = true;
+            }
+            if (s_yoloChanged) {
+                s_yoloChanged = false;
+                // 延遲寫入，避免每幀都寫（每 2 秒寫一次）
+                static DWORD s_lastWrite = 0;
+                DWORD now = GetTickCount();
+                if (now - s_lastWrite > 2000) {
+                    s_lastWrite = now;
+                    OffsetConfig::SaveYoloSettings(
+                        g_cfg.use_yolo_mode.load(),
+                        g_cfg.yolo_confidence.load(),
+                        g_cfg.yolo_nms_threshold.load()
+                    );
+                }
+            }
+        } else {
+            g_cfg.use_yolo_mode.store(false);
+        }
+        ImGui::Spacing();
+        ImGui::Separator();
+        // ── 像素視覺模式 ──
+        UiCheckbox("視覺模式 (Vision)", &useVisualMode);
+        if (useVisualMode) {
+            g_cfg.use_visual_mode.store(true);
+            ImGui::TextColored(ImVec4(0.2f, 0.8f, 0.2f, 1.0f), "  像素掃描血條辨識");
+        } else {
+            // 如果沒有手動開啟且 YOLO 也關閉，才關閉視覺模式
+            if (!GetYoloMode()) {
+                g_cfg.use_visual_mode.store(false);
+            }
+            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "  記憶體讀取為主");
+        }
         ImGui::Spacing();
         UiEndPanel();
 

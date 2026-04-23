@@ -214,6 +214,12 @@ struct BotConfig {
     // 視覺模式：以視覺辨識為主，取代記憶體讀取
     std::atomic<bool>  use_visual_mode{false}; // 開啟視覺模式（主力）
     std::atomic<int>   visual_scan_timeout_ms{100}; // 視覺掃描超時（毫秒）
+
+    // ═══════════════ YOLO 視覺辨識 ════════════════
+    // 獨立 YOLO 模式，與 use_visual_mode 互斥（像素血條）
+    std::atomic<bool>  use_yolo_mode{false};        // 啟用 YOLO 視覺辨識
+    std::atomic<float> yolo_confidence{0.50f};     // 信心度閾值 (0.0~1.0)
+    std::atomic<int>   yolo_nms_threshold{45};      // NMS 閾值 (0~100, 轉為 0.0~1.0)
     // ═════════════════════════════════════════
 
     // ── 熱鍵 ──
@@ -420,6 +426,12 @@ extern void GetPlayerName(char* outName, int maxLen);
 extern std::atomic<bool> g_licenseValid;
 extern bool IsLicenseValid();
 extern void SetLicenseValid(bool valid);
+
+// ✅ YOLO 設定存取（供 GUI 使用）
+extern bool GetYoloMode();
+extern void SetYoloMode(bool enabled);
+extern float GetYoloConfidence();
+extern void SetYoloConfidence(float conf);
 
 // ✅ PAUSED 恢復時用的前一個狀態（用於正確恢復）
 extern BotState s_pausedPreviousState;

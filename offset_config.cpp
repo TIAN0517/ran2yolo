@@ -847,6 +847,62 @@ bool OffsetConfig::Reload() {
     return LoadFromFile(NULL);
 }
 
+// ============================================================
+// YOLO 設定持久化（INI 格式）
+// ============================================================
+#include <cstdio>  // for sprintf in this file
+static char s_yoloIniPath[MAX_PATH] = {0};
+
+static void EnsureYoloIniPath() {
+    if (s_yoloIniPath[0]) return;
+    GetExeDirectoryA(s_yoloIniPath, MAX_PATH);
+    strncat_s(s_yoloIniPath, MAX_PATH, "yolo_config.ini", _TRUNCATE);
+}
+
+// 供 bot_logic.cpp 呼叫的包裝函式
+bool OffsetConfig_LoadYolo() {
+    bool yoloMode = false;
+    float confidence = 0.50f;
+    int nmsThreshold = 45;
+    bool loaded = OffsetConfig::LoadYoloSettings(&yoloMode, &confidence, &nmsThreshold);
+    if (loaded) {
+        g_cfg.use_yolo_mode.store(yoloMode);
+        g_cfg.yolo_confidence.store(confidence);
+        g_cfg.yolo_nms_threshold.store(nmsThreshold);
+    }
+    return loaded;
+}
+
+bool OffsetConfig::SaveYoloSettings(bool yoloMode, float confidence, int nmsThreshold) {
+    EnsureYoloIniPath();
+    char buf[32];
+
+    WritePrivateProfileStringA("YOLO", "Enabled", yoloMode ? "1" : "0", s_yoloIniPath);
+
+    sprintf_s(buf, "%.2f", confidence);
+    WritePrivateProfileStringA("YOLO", "Confidence", buf, s_yoloIniPath);
+
+    sprintf_s(buf, "%d", nmsThreshold);
+    WritePrivateProfileStringA("YOLO", "NMSThreshold", buf, s_yoloIniPath);
+
+    return true;
+}
+
+bool OffsetConfig::LoadYoloSettings(bool* outYoloMode, float* outConfidence, int* outNmsThreshold) {
+    EnsureYoloIniPath();
+    if (!outYoloMode || !outConfidence || !outNmsThreshold) return false;
+
+    *outYoloMode = (GetPrivateProfileIntA("YOLO", "Enabled", 0, s_yoloIniPath) != 0);
+
+    char buf[32] = {0};
+    GetPrivateProfileStringA("YOLO", "Confidence", "0.50", buf, sizeof(buf), s_yoloIniPath);
+    *outConfidence = (float)atof(buf);
+
+    *outNmsThreshold = GetPrivateProfileIntA("YOLO", "NMSThreshold", 45, s_yoloIniPath);
+
+    return true;
+}
+
 const char* OffsetConfig::GetLoadSource() { return s_loadSource; }
 DWORD OffsetConfig::GetConfigVersion() { return s_configVersion; }
 

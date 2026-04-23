@@ -1,7 +1,7 @@
 #pragma once
 // ============================================================
 // 視覺實體掃描模組（Win7~Win11 通用）
-// 純像素掃描取代記憶體讀取
+// 純像素掃描 + YOLO 物件偵測
 // ============================================================
 #include <windows.h>
 
@@ -29,16 +29,44 @@ struct VisualPlayerState {
     int screenX = 0;       // 玩家畫面座標
     int screenY = 0;
     int gold = 0;          // 金幣（像素計數估算）
-    bool found = false;    // 是否成功讀到
+    bool found = false;     // 是否成功讀到
 };
+
+// ============================================================
+// YOLO 偵測器控制 (USE_YOLO_DETECTION 必須定義)
+// ============================================================
+#ifdef USE_YOLO_DETECTION
+
+// 初始化 YOLO 偵測器
+// modelPath: ONNX 模型路徑
+// 返回: 是否成功
+bool InitYoloDetector(const char* modelPath);
+bool InitYoloDetectorW(const wchar_t* modelPath);
+
+// 檢查 YOLO 是否就緒
+bool IsYoloReady();
+
+// 釋放 YOLO 資源
+void DestroyYoloDetector();
+
+// 設定 YOLO 閾值
+void SetYoloThresholds(float confidence, float nms_threshold);
+
+// 獲取最後推論時間 (毫秒)
+float GetYoloInferenceTime();
+
+// YOLO 掃描怪物 (直接調用)
+int ScanYoloMonsters(HWND hWnd, VisualMonster* outMonsters, int maxMonsters,
+                    int gameW, int gameH);
+
+#endif // USE_YOLO_DETECTION
 
 // ============================================================
 // 函式宣告
 // ============================================================
 
-// 掃描畫面所有怪物血條（取代記憶體實體池掃描）
-// 原理：從上往下、從左往右掃描 RGBA 像素
-// 條件：R > 200 且 G < 80 且 B < 80 的連續像素列（寬 3-5px，高 8-15px）= 血條
+// 掃描畫面所有怪物血條（整合 YOLO + 像素掃描）
+// 如果定義了 USE_YOLO_DETECTION 且 YOLO 可用，優先使用 YOLO
 // 返回找到的怪物數量
 int ScanVisualMonsters(HWND hWnd, VisualMonster* outMonsters, int maxMonsters);
 

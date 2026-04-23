@@ -80,6 +80,24 @@ static CRITICAL_SECTION s_stateTransitionCs;  // BUG-C002: 狀態轉換需要鎖
 std::atomic<bool> g_licenseValid{false};
 bool IsLicenseValid() { return g_licenseValid.load(); }
 void SetLicenseValid(bool valid) { g_licenseValid.store(valid); }
+
+// ═══════════════ YOLO 設定存取 ════════════════
+bool GetYoloMode() { return g_cfg.use_yolo_mode.load(); }
+void SetYoloMode(bool enabled) {
+    g_cfg.use_yolo_mode.store(enabled);
+    // 互斥邏輯：開啟 YOLO 時自動關閉像素視覺模式
+    if (enabled) {
+        g_cfg.use_visual_mode.store(false);
+    }
+}
+float GetYoloConfidence() { return g_cfg.yolo_confidence.load(); }
+void SetYoloConfidence(float conf) {
+    // 限幅 [0.0, 1.0]
+    if (conf < 0.0f) conf = 0.0f;
+    if (conf > 1.0f) conf = 1.0f;
+    g_cfg.yolo_confidence.store(conf);
+}
+
 static volatile LONG s_uiCacheCsInit = 0;
 static volatile LONG s_invCacheCsInited = 0;
 static DWORD s_currentTargetId = 0;
@@ -1027,9 +1045,37 @@ void InitBotLogic() {
     }
     InitAntiDebugProtection();
     InitAntiDebugHooks();
+
+    // ── YOLO 設定載入（INI 持久化）──
+    extern bool OffsetConfig_LoadYolo();
+    bool yoloLoaded = OffsetConfig_LoadYolo();
+    if (yoloLoaded) {
+        UIAddLog("[YOLO] 已載入設定 (mode=%d, conf=%.2f)",
+            g_cfg.use_yolo_mode.load(), g_cfg.yolo_confidence.load());
+    } else {
+        UIAddLog("[YOLO] 使用預設設定");
+    }
+
+    // ── YOLO 偵測器初始化（延遲載入）──
+    // 這裡只初始化，實際使用在視覺掃描時
+    extern bool InitYoloDetector(const char*);
+    if (InitYoloDetector("models\\best.onnx")) {
+        float conf = g_cfg.yolo_confidence.load();
+        float nms = g_cfg.yolo_nms_threshold.load() / 100.0f;
+        extern void SetYoloThresholds(float, float);
+        SetYoloThresholds(conf, nms);
+        UIAddLog("[YOLO] 偵測器已就緒 (conf=%.2f, nms=%.2f)", conf, nms);
+    } else {
+        UIAddLog("[YOLO] 偵測器初始化失敗，將使用像素掃描");
+    }
+
     Log("系統", "Bot 邏輯初始化完成");
 }
 void ShutdownBotLogic() {
+    // ── YOLO 資源釋放 ──
+    extern void DestroyYoloDetector();
+    DestroyYoloDetector();
+
     ShutdownAttackSender();
     ScreenshotAssist_Shutdown();
     // 只刪除已初始化的 CriticalSection
@@ -2659,8 +2705,26 @@ void BotTick(GameHandle* gh) {
 
     // ═══════════════════════════════════════════════════════════
     // 視覺模式（視覺辨識為主，取代記憶體讀取）
+    // 支援兩種模式：
+    //   - use_visual_mode: 像素掃描（原有邏輯）
+    //   - use_yolo_mode: YOLO 物件偵測（整合到 ScanVisualMonsters）
     // ═══════════════════════════════════════════════════════════
-    if (g_cfg.use_visual_mode.load()) {
+    if (g_cfg.use_visual_mode.load() || g_cfg.use_yolo_mode.load()) {
+
+        // ── YOLO 模式初始化檢查 ──
+        if (g_cfg.use_yolo_mode.load()) {
+            extern bool IsYoloReady();
+            extern float GetYoloInferenceTime();
+            static bool s_yoloWarned = false;
+            if (!IsYoloReady() && !s_yoloWarned) {
+                Log("YOLO", "⚠️ YOLO 偵測器未就緒，使用像素掃描");
+                s_yoloWarned = true;
+            } else if (IsYoloReady() && s_yoloWarned) {
+                // YOLO 恢復了
+                s_yoloWarned = false;
+                Log("YOLO", "✅ YOLO 偵測器已就緒");
+            }
+        }
         // ── HWND 驗證 ──
         if (!gh || !gh->hWnd || !IsWindow(gh->hWnd)) {
             Sleep(100);
@@ -2696,6 +2760,20 @@ void BotTick(GameHandle* gh) {
         DWORD scanStart = GetTickCount();
         if (currentState == BotState::HUNTING || currentState == BotState::IDLE) {
             vMonsterCount = ScanVisualMonsters(gh->hWnd, vMonsters, 32);
+
+            // ── YOLO 推論時間日誌（每 5 秒一次）──
+            if (g_cfg.use_yolo_mode.load()) {
+                extern float GetYoloInferenceTime();
+                float inferenceMs = GetYoloInferenceTime();
+                if (inferenceMs > 0) {
+                    static DWORD s_lastYoloLog = 0;
+                    if (nowVisual - s_lastYoloLog > 5000) {
+                        Logf("YOLO", "推論時間: %.2f ms, 偵測: %d 個目標", inferenceMs, vMonsterCount);
+                        s_lastYoloLog = nowVisual;
+                    }
+                }
+            }
+
             if (vMonsterCount > 0) {
                 // 視覺模式鎖怪
                 if (s_combatIntent == CombatIntent::SEEKING && vMonsterCount > 0) {
@@ -2704,7 +2782,8 @@ void BotTick(GameHandle* gh) {
                     s_combatIntent = CombatIntent::ENGAGING;
                     s_targetLockTime = nowVisual;
                     if (nowVisual - s_lastVisualLog > 5000 || s_lastVisualLog == 0) {
-                        Logf("視覺", "🎯 視覺鎖怪成功 (%d,%d) hp=%d%%", best->relX, best->relY, best->hpPct);
+                        const char* modeTag = g_cfg.use_yolo_mode.load() ? "YOLO" : "視覺";
+                        Logf(modeTag, "🎯 鎖怪成功 (%d,%d) hp=%d%%", best->relX, best->relY, best->hpPct);
                     }
                 }
 

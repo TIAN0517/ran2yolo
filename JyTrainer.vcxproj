@@ -40,13 +40,13 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>false</SDLCheck>
-      <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;WINVER=0x0601;_WIN32_WINNT=0x0601;_CRT_SECURE_NO_WARNINGS;_USING_V110_SDK71_;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;WINVER=0x0601;_WIN32_WINNT=0x0601;_CRT_SECURE_NO_WARNINGS;_USING_V110_SDK71_;USE_YOLO_DETECTION;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <!-- ✅ 靜態連結：無需 VCRUNTIME140.dll -->
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <BufferSecurityCheck>false</BufferSecurityCheck>
       <AdditionalOptions>/utf-8  /wd28159 /wd4819 %(AdditionalOptions)</AdditionalOptions>
       <DebugInformationFormat Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">ProgramDatabase</DebugInformationFormat>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)imgui;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)imgui;$(ProjectDir)onnxruntime\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -55,13 +55,18 @@
       <EnableUAC>false</EnableUAC>
       <!-- ✅ Win7 最小版本：5.01 = Windows XP / Server 2003 SP1 -->
       <MinimumRequiredVersion>5.01</MinimumRequiredVersion>
-      <!-- 靜態連結 + Winsock -->
+      <!-- 靜態連結 + Winsock + ONNX Runtime -->
       <AdditionalDependencies>
-        psapi.lib;user32.lib;kernel32.lib;winmm.lib;gdi32.lib;ws2_32.lib;advapi32.lib;wininet.lib;shlwapi.lib;
+        psapi.lib;user32.lib;kernel32.lib;winmm.lib;gdi32.lib;ws2_32.lib;advapi32.lib;wininet.lib;shlwapi.lib;onnxruntime.lib;
         %(AdditionalDependencies)
       </AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(ProjectDir)onnxruntime\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <IgnoreAllDefaultLibraries>false</IgnoreAllDefaultLibraries>
     </Link>
+    <!-- 後續建置事件: 複製 ONNX Runtime DLL -->
+    <PostBuildEvent>
+      <Command>if exist "$(ProjectDir)onnxruntime\onnxruntime.dll" copy /Y "$(ProjectDir)onnxruntime\onnxruntime.dll" "$(OutDir)" 2&gt;nul</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <!-- Win7 編譯群組：啟用 Win7 座標 -->
   <ItemDefinitionGroup Condition="'$(Configuration)'=='Release_Win7'">
@@ -70,12 +75,12 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>false</SDLCheck>
-      <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;WINVER=0x0601;_WIN32_WINNT=0x0601;_CRT_SECURE_NO_WARNINGS;_USING_V110_SDK71_;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;WINVER=0x0601;_WIN32_WINNT=0x0601;_CRT_SECURE_NO_WARNINGS;_USING_V110_SDK71_;USE_YOLO_DETECTION;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <BufferSecurityCheck>false</BufferSecurityCheck>
       <AdditionalOptions>/utf-8  /wd28159 /wd4819 %(AdditionalOptions)</AdditionalOptions>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)imgui;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)imgui;$(ProjectDir)onnxruntime\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -84,11 +89,16 @@
       <EnableUAC>false</EnableUAC>
       <MinimumRequiredVersion>5.01</MinimumRequiredVersion>
       <AdditionalDependencies>
-        psapi.lib;user32.lib;kernel32.lib;winmm.lib;gdi32.lib;ws2_32.lib;advapi32.lib;wininet.lib;shlwapi.lib;
+        psapi.lib;user32.lib;kernel32.lib;winmm.lib;gdi32.lib;ws2_32.lib;advapi32.lib;wininet.lib;shlwapi.lib;onnxruntime.lib;
         %(AdditionalDependencies)
       </AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(ProjectDir)onnxruntime\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <IgnoreAllDefaultLibraries>false</IgnoreAllDefaultLibraries>
     </Link>
+    <!-- 後續建置事件: 複製 ONNX Runtime DLL -->
+    <PostBuildEvent>
+      <Command>if exist "$(ProjectDir)onnxruntime\onnxruntime.dll" copy /Y "$(ProjectDir)onnxruntime\onnxruntime.dll" "$(OutDir)" 2&gt;nul</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <!-- 核心 C++ 檔 -->
   <ItemGroup>
@@ -107,6 +117,8 @@
     <ClCompile Include="screenshot_assist.cpp" />
     <ClCompile Include="coord_calib.cpp" />
     <ClCompile Include="visionentity.cpp" />
+    <!-- YOLO 偵測器 -->
+    <ClCompile Include="yolo_detector.cpp" />
   </ItemGroup>
   <!-- 核心 -->
   <ItemGroup>
@@ -144,6 +156,9 @@
     <ClInclude Include="visionentity.h" />
     <ClInclude Include="embedded_images.h" />
     <ClInclude Include="resource.h" />
+    <!-- YOLO 偵測器 -->
+    <ClInclude Include="yolo_detector.h" />
+    <ClInclude Include="onnx_config.h" />
   </ItemGroup>
   <!-- 應用程式圖示資源 -->
   <ItemGroup>
