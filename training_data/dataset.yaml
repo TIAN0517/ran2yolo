@@ -1,0 +1,8 @@
+names:
+  0: monster
+  1: player
+  2: npc
+  3: npc_shop
+path: ./training_data
+train: images
+val: images
