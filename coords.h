@@ -5,16 +5,28 @@
 // 純 Win7 版本，無平台檢測
 
 #include <windows.h>
-#include "input_sender.h"
+
+// ============================================================
+// IsWin11: Check Windows version (inline to avoid extern issues)
+// ============================================================
+inline bool CoordsIsWin11() {
+    OSVERSIONINFOW osvi = {};
+    osvi.dwOSVersionInfoSize = sizeof(osvi);
+    #pragma warning(push)
+    #pragma warning(disable:4996)
+    if (GetVersionExW(&osvi)) {
+        return osvi.dwMajorVersion >= 10;
+    }
+    #pragma warning(pop)
+    return false;
+}
 
 namespace Coords
 {
+    inline bool IsWin11() { return CoordsIsWin11(); }
+
     // ============================================================
-    // 是否 Win11
-    // ============================================================
-    inline bool IsWin11() {
-        return !IsWin7Platform();
-    }
+    // 基本座標型別
     // 遊戲內座標直接使用 1024x768 範圍（無需轉換）
     // ============================================================
     struct Point
