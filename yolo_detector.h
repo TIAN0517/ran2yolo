@@ -9,6 +9,7 @@
 #include <windows.h>
 #include <vector>
 #include "onnx_loader.h"
+#include "visionentity.h"
 
 // ============================================================
 // 前向宣告
@@ -113,11 +114,11 @@ private:
                      int padX, int padY, float scale, int origW, int origH);
 
     // ONNX Runtime C API 句柄
-    void* m_env;           // OrtEnv*
-    void* m_session;       // OrtSession*
-    void* m_allocator;     // OrtAllocator*
-    void* m_inputNames;    // OrtSessionOptions*
-    void* m_outputNames;   // char**
+    OrtEnv* m_env;
+    OrtSession* m_session;
+    OrtAllocator* m_allocator;
+    char** m_inputNames;
+    char** m_outputNames;
     int m_numOutputNames;
 
     // 模型參數
@@ -138,7 +139,7 @@ private:
     std::vector<float> m_outputTensor;   // 模型輸出
 
     // 推論選項
-    void* m_runOptions;    // OrtRunOptions*
+    OrtRunOptions* m_runOptions;
 
     // 是否初始化
     bool m_initialized;

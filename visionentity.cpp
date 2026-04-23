@@ -65,7 +65,7 @@ void DestroyYoloDetector() {
 void SetYoloThresholds(float conf, float nms) {
     if (g_yoloInited) {
         g_yolo.SetConfidenceThreshold(conf);
-        g_yolo.SetNMSThreshold(nms);
+        g_yolo.SetNmsThreshold(nms);
     }
 }
 
@@ -93,7 +93,7 @@ int ScanYoloMonsters(HWND hWnd, VisualMonster* outMonsters, int maxMonsters,
 
     // YOLO 推論
     std::vector<YoloBox> boxes;
-    int numBoxes = g_yolo.Detect(pixels.data(), gameW, gameH, boxes);
+    int numBoxes = g_yolo.Detect(pixels, gameW, gameH, boxes);
     if (numBoxes <= 0) {
         return 0;
     }

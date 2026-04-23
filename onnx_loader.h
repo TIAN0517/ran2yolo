@@ -18,7 +18,41 @@ typedef struct OrtSessionOptions OrtSessionOptions;
 typedef struct OrtSession OrtSession;
 typedef struct OrtRunOptions OrtRunOptions;
 typedef struct OrtAllocator OrtAllocator;
-typedef enum OrtLoggingLevel OrtLoggingLevel;
+typedef struct OrtMemoryInfo OrtMemoryInfo;
+typedef struct OrtValue OrtValue;
+typedef struct OrtTypeInfo OrtTypeInfo;
+typedef struct OrtTensorTypeAndShapeInfo OrtTensorTypeAndShapeInfo;
+typedef enum OrtLoggingLevel : int OrtLoggingLevel;
+
+// ============================================================
+// 常數定義
+// ============================================================
+#ifndef ORT_LOGGING_LEVEL_WARNING
+#define ORT_LOGGING_LEVEL_WARNING ((OrtLoggingLevel)3)
+#endif
+#ifndef ORT_LOGGING_LEVEL_ERROR
+#define ORT_LOGGING_LEVEL_ERROR ((OrtLoggingLevel)4)
+#endif
+
+#ifndef OrtMemTypeDefault
+#define OrtMemTypeDefault 0
+#endif
+
+#ifndef OrtArenaAllocator
+#define OrtArenaAllocator 1
+#endif
+
+#ifndef ORT_ENABLE_ALL
+#define ORT_ENABLE_ALL 99U
+#endif
+
+#ifndef ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT
+#define ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT 1
+#endif
+
+#ifndef ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED
+#define ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED 0
+#endif
 
 // ============================================================
 // 函數指標類型
@@ -37,19 +71,20 @@ typedef void (*OrtReleaseStatusFn)(OrtStatus*);
 typedef OrtStatus* (*OrtGetAllocatorFn)(OrtSession*, OrtAllocator**);
 typedef void (*OrtReleaseAllocatorFn)(OrtAllocator*);
 typedef OrtStatus* (*OrtAllocatorFreeFn)(OrtAllocator*, void*);
-typedef OrtStatus* (*OrtRunFn)(OrtSession*, const OrtRunOptions*, const char* const*, const float* const*, size_t, const char* const*, size_t, OrtRunOptions*);
+typedef OrtStatus* (*OrtRunFn)(OrtSession*, const OrtRunOptions*, const char* const*, OrtValue* const*, size_t, const char* const*, OrtValue**, OrtRunOptions*);
 typedef OrtStatus* (*OrtGetTensorDataFn)(OrtValue*, float**, size_t**, int*);
 typedef OrtStatus* (*OrtValueGetCountFn)(OrtValue*, size_t*);
 typedef OrtStatus* (*OrtReleaseValueFn)(OrtValue*);
-typedef OrtStatus* (*OrtCreateTensorWithDataAsOrtValueFn)(const OrtAllocator*, const OrtValue*, size_t, const size_t*, OrtValue**);
+typedef OrtStatus* (*OrtCreateTensorWithDataAsOrtValueFn)(const OrtAllocator*, const void*, size_t, const size_t*, size_t, int, OrtValue**);
 typedef OrtStatus* (*OrtCreateMemoryInfoFn)(const char*, int, int, int, OrtMemoryInfo**);
+typedef void (*OrtReleaseMemoryInfoFn)(OrtMemoryInfo*);
 typedef OrtStatus* (*OrtSessionGetInputCountFn)(OrtSession*, size_t*);
 typedef OrtStatus* (*OrtSessionGetOutputCountFn)(OrtSession*, size_t*);
 typedef OrtStatus* (*OrtSessionGetInputNameFn)(OrtSession*, size_t, OrtAllocator*, char**);
 typedef OrtStatus* (*OrtSessionGetOutputNameFn)(OrtSession*, size_t, OrtAllocator*, char**);
 typedef OrtStatus* (*OrtSessionGetInputTypeInfoFn)(OrtSession*, size_t, OrtValue**);
 typedef OrtStatus* (*OrtCastTypeInfoToTensorInfoFn)(const OrtValue*, const OrtTensorTypeAndShapeInfo**);
-typedef void (*OrtReleaseTypeInfoFn)(OrtValue*);
+typedef void (*OrtReleaseTypeInfoFn)(OrtTypeInfo*);
 typedef OrtStatus* (*OrtGetDimensionsCountFn)(const OrtTensorTypeAndShapeInfo*, size_t*);
 typedef OrtStatus* (*OrtGetDimensionsFn)(const OrtTensorTypeAndShapeInfo*, int64_t*, size_t);
 typedef OrtStatus* (*OrtCreateRunOptionsFn)(OrtRunOptions**);
@@ -66,15 +101,11 @@ public:
     ~OnnxLoader() { Unload(); }
 
     // 載入 ONNX Runtime DLL
-    // modelDir: 模型所在目錄（用於 DLL Side-by-Side 部署）
-    // 返回: 是否成功
     bool Load(const char* modelDir = NULL) {
         if (m_loaded) return true;
         Unload();
 
-        // 嘗試多個可能的 DLL 路徑
         const char* dllNames[] = {
-            "onnxruntime.dll",
             "onnxruntime.dll",
             "..\\onnxruntime-win-x64-1.17.3\\onnxruntime.dll"
         };
@@ -90,27 +121,21 @@ public:
         };
 
         bool found = false;
-        for (int p = 0; p < 3 && !found; p++) {
+        for (int p = 0; p < 2 && !found; p++) {
             for (int s = 0; s < 7 && !found; s++) {
                 std::string dllPath = searchPaths[s];
-                if (dllPath.empty()) dllPath = "";
-                else if (dllPath.back() != '\\' && dllPath.back() != '/') dllPath += "\\";
-
+                if (!dllPath.empty() && dllPath.back() != '\\' && dllPath.back() != '/') {
+                    dllPath += "\\";
+                }
                 std::string fullPath = dllPath + dllNames[p];
                 m_dll = LoadLibraryA(fullPath.c_str());
-                if (m_dll) {
-                    found = true;
-                    break;
-                }
+                if (m_dll) found = true;
             }
         }
 
         if (!found) {
-            // 嘗試 GetModuleHandle（如果已經在其他地方載入）
             m_dll = GetModuleHandleA("onnxruntime.dll");
-            if (m_dll) {
-                found = true;
-            }
+            if (m_dll) found = true;
         }
 
         if (!found) {
@@ -118,7 +143,6 @@ public:
             return false;
         }
 
-        // 解析導出函數
         #define LOAD_PROC(type, name) \
             name = (type)GetProcAddress(m_dll, #name); \
             if (!name) { printf("[OnnxLoader] Missing export: " #name "\n"); Unload(); return false; }
@@ -172,8 +196,7 @@ public:
         m_dll = NULL;
         m_loaded = false;
 
-        // 清除函數指標
-        #define CLEAR_PROC(name) name = NULL;
+        #define CLEAR_PROC(name) name = nullptr;
         CLEAR_PROC(OrtCreateEnv);
         CLEAR_PROC(OrtReleaseEnv);
         CLEAR_PROC(OrtCreateSessionOptions);
@@ -212,7 +235,7 @@ public:
 
     bool IsLoaded() const { return m_loaded; }
 
-    // 函數指標（公開）
+    // 函數指標
     OrtCreateEnvFn OrtCreateEnv = nullptr;
     OrtReleaseEnvFn OrtReleaseEnv = nullptr;
     OrtCreateSessionOptionsFn OrtCreateSessionOptions = nullptr;

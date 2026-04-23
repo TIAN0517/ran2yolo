@@ -5,6 +5,13 @@
 // ============================================================
 #include <windows.h>
 
+// YOLO types (forward declare if USE_YOLO_DETECTION)
+// ============================================================
+#ifdef USE_YOLO_DETECTION
+struct YoloBox;  // Forward declaration
+#include "yolo_detector.h"
+#endif
+
 // ============================================================
 // 視覺怪物結構
 // ============================================================

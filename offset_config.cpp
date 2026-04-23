@@ -7,6 +7,7 @@
 
 #include "offset_config.h"
 #include "offsets.h"
+#include "bot_logic.h"
 #include "win32_helpers.h"
 #include <cstdio>
 #include <cstdlib>
