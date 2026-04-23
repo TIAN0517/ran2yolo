@@ -33,6 +33,16 @@
 #ifndef __readfsdword
 #define __readfsdword(x) 0
 #endif
+#ifndef __readgsqword
+#define __readgsqword(x) 0
+#endif
+#endif
+
+// x64 uses GS segment, x86 uses FS segment
+#ifdef _WIN64
+#define READ_PEB_ADDR() ((void*)(__readgsqword(0x30)))
+#else
+#define READ_PEB_ADDR() ((void*)(__readfsdword(0x30)))
 #endif
 
 // ============================================================
@@ -602,7 +612,7 @@ static void InitAntiDebugProtection() {
             ULONG NtGlobalFlag;
             // ... 其餘欄位省略
         } PEB_FULL;
-        PEB_FULL* peb = (PEB_FULL*)__readfsdword(0x30);
+        PEB_FULL* peb = (PEB_FULL*)READ_PEB_ADDR();
         if (peb) {
             peb->BeingDebugged = FALSE;
             peb->NtGlobalFlag = 0;
