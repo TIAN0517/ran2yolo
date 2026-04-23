@@ -447,8 +447,8 @@ void SetGameHandle(GameHandle* gh) {
         CloseHandle(oldHandle);
     }
 
-    LogGame("[Handle] SetGameHandle: pid=%u hProcess=%p baseAddr=0x%08X attached=%d",
-        gh->pid, gh->hProcess, gh->baseAddr, gh->attached);
+    LogGame("[Handle] SetGameHandle: pid=%u hProcess=%p baseAddr=" ADDR_FORMAT " attached=%d",
+        gh->pid, gh->hProcess, (ADDR)gh->baseAddr, gh->attached);
 }
 
 // ============================================================
@@ -575,21 +575,21 @@ static bool IsReasonableBase(DWORD base) {
 }
 
 // 前向宣告（RefreshGameBaseAddress 在 GetGameBaseAddress 之前定義）
-DWORD GetGameBaseAddress(GameHandle* gh);
+ADDR GetGameBaseAddress(GameHandle* gh);
 
 // 刷新遊戲模組基址（傳入現有 GameHandle，不重新 OpenProcess）
-DWORD RefreshGameBaseAddress(GameHandle* gh) {
+ADDR RefreshGameBaseAddress(GameHandle* gh) {
     if (!gh || !gh->hProcess) return 0;
-    DWORD base = GetGameBaseAddress(gh);
+    ADDR base = GetGameBaseAddress(gh);
     if (base) {
         gh->baseAddr = base;
         gh->attached = true;
-        LogGame("[Handle] ✅ RefreshGameBaseAddress 成功: baseAddr=0x%08X", base);
+        LogGame("[Handle] ✅ RefreshGameBaseAddress 成功: baseAddr=" ADDR_FORMAT, base);
     }
     return base;
 }
 
-DWORD GetGameBaseAddress(GameHandle* gh) {
+ADDR GetGameBaseAddress(GameHandle* gh) {
     if (!gh || !gh->hProcess) return 0;
 
     bool isWin7 = IsWin7System();
@@ -612,19 +612,18 @@ DWORD GetGameBaseAddress(GameHandle* gh) {
         BOOL ok = Module32First(snap, &me);
         while (ok) {
             if (IsGameModule(me.szModule, NULL)) {
-                DWORD base = (DWORD)me.modBaseAddr;
-                LogGame("[偵測] CreateToolhelp32Snapshot 找到 %S (base=0x%08X)",
-                    me.szModule, (unsigned int)base);
+                ADDR base = (ADDR)me.modBaseAddr;
+                LogGame("[偵測] CreateToolhelp32Snapshot 找到 %S (base=" ADDR_FORMAT ")",
+                    me.szModule, base);
                 CloseHandle(snap);
 
                 if (!IsReasonableBase(base)) {
-                    LogGame("[偵測] ❌ Base=0x%08X 不是合理的 32-bit user-mode 載入位址",
-                        (unsigned int)base);
+                    LogGame("[偵測] ❌ Base=" ADDR_FORMAT " 不是合理的 32-bit user-mode 載入位址", base);
                     LogGame("[偵測]    提示：請用管理員身份執行 JyTrainer.exe");
                     return 0;
                 }
 
-                LogGame("[偵測] ✅ 取得遊戲主模組基址 = 0x%08X", (unsigned int)base);
+                LogGame("[偵測] ✅ 取得遊戲主模組基址 = " ADDR_FORMAT, base);
                 return base;
             }
             ok = Module32Next(snap, &me);
@@ -653,16 +652,15 @@ DWORD GetGameBaseAddress(GameHandle* gh) {
                     shortName = name;
                 }
 
-                LogGame("  [%d] %s -> 0x%08X", i, shortName, (unsigned int)base);
+                LogGame("  [%d] %s -> " ADDR_FORMAT, i, shortName, base);
 
                 if (IsGameModule(NULL, name) && IsReasonableBase(base)) {
-                    LogGame("[偵測] ✅ EnumProcessModules 取得遊戲主模組基址 = 0x%08X",
-                        (unsigned int)base);
+                    LogGame("[偵測] ✅ EnumProcessModules 取得遊戲主模組基址 = " ADDR_FORMAT, base);
                     return base;
                 }
 
                 if (IsGameModule(NULL, name) && !IsReasonableBase(base)) {
-                    LogGame("[偵測] ❌ 遊戲主模組 Base=0x%08X 不合理，忽略", (unsigned int)base);
+                    LogGame("[偵測] ❌ 遊戲主模組 Base=" ADDR_FORMAT " 不合理，忽略", base);
                 }
             }
         }
@@ -675,22 +673,22 @@ DWORD GetGameBaseAddress(GameHandle* gh) {
     // ── Fallback：直接嘗試從遊戲記憶體空間搜尋 PE Header ──
     LogGame("[偵測] 直接記憶體搜尋遊戲主模組（最後手段）...");
     MEMORY_BASIC_INFORMATION mbi = {};
-    DWORD addr = 0x00400000;  // 典型 32-bit 遊戲載入位址
-    while (VirtualQueryEx(gh->hProcess, (LPCVOID)addr, &mbi, sizeof(mbi)) != 0) {
+    ADDR addr = 0x00400000;  // 典型 32-bit 遊戲載入位址
+    while (VirtualQueryEx(gh->hProcess, (LPCVOID)(ULONG_PTR)addr, &mbi, sizeof(mbi)) != 0) {
         if ((mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE)) &&
             mbi.RegionSize >= 0x1000) {
             BYTE header[4] = {};
             SIZE_T bytesRead = 0;
-            ReadProcessMemory(gh->hProcess, (LPCVOID)addr, header, sizeof(header), &bytesRead);
+            ReadProcessMemory(gh->hProcess, (LPCVOID)(ULONG_PTR)addr, header, sizeof(header), &bytesRead);
             if (header[0] == 0x4D && header[1] == 0x5A) {  // "MZ"
-                LogGame("[偵測] 直接記憶體搜尋找到 MZ header @ 0x%08X", addr);
+                LogGame("[偵測] 直接記憶體搜尋找到 MZ header @ " ADDR_FORMAT, addr);
                 if (IsReasonableBase(addr)) {
-                    LogGame("[偵測] ✅ 直接記憶體搜尋成功: 遊戲主模組基址 = 0x%08X", addr);
+                    LogGame("[偵測] ✅ 直接記憶體搜尋成功: 遊戲主模組基址 = " ADDR_FORMAT, addr);
                     return addr;
                 }
             }
         }
-        addr = (DWORD)mbi.BaseAddress + mbi.RegionSize;
+        addr = (ADDR)mbi.BaseAddress + (ADDR)mbi.RegionSize;
         if (addr >= 0x80000000) break;
     }
 
@@ -826,10 +824,10 @@ bool FindGameProcess(GameHandle* gh) {
     gh->attached = (gh->baseAddr != 0);
 
     if (gh->attached) {
-        printf("[偵測] ✅ 成功附加遊戲！PID=%u Base=0x%08X HWND=%p\n",
-            (unsigned int)pid, (unsigned int)gh->baseAddr, gh->hWnd);
-        LogGame("[偵測] ✅ 成功附加遊戲！PID=%u Base=0x%08X HWND=%p",
-            (unsigned int)pid, (unsigned int)gh->baseAddr, gh->hWnd);
+        printf("[偵測] ✅ 成功附加遊戲！PID=%u Base=" ADDR_FORMAT " HWND=%p\n",
+            (unsigned int)pid, (ADDR)gh->baseAddr, gh->hWnd);
+        LogGame("[偵測] ✅ 成功附加遊戲！PID=%u Base=" ADDR_FORMAT " HWND=%p",
+            (unsigned int)pid, (ADDR)gh->baseAddr, gh->hWnd);
         return true;
     }
 
