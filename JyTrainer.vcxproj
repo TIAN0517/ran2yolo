@@ -1,12 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
+    <!-- x64 發布版本 (主要配置) -->
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <!-- Win7 x64 版本 -->
+    <ProjectConfiguration Include="Release_Win7|x64">
+      <Configuration>Release_Win7</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <!-- 保留 x86 向後兼容 (可選) -->
     <ProjectConfiguration Include="Release|Win32">
       <Configuration>Release</Configuration>
-      <Platform>Win32</Platform>
-    </ProjectConfiguration>
-    <ProjectConfiguration Include="Release_Win7|Win32">
-      <Configuration>Release_Win7</Configuration>
       <Platform>Win32</Platform>
     </ProjectConfiguration>
   </ItemGroup>
@@ -15,12 +22,12 @@
     <Keyword>Win32Proj</Keyword>
     <ProjectGuid>{B2C3D4E5-1234-5678-9ABC-DEF012345678}</ProjectGuid>
     <RootNamespace>JyTrainer</RootNamespace>
-    <WindowsTargetPlatformVersion>10.0.19041.0</WindowsTargetPlatformVersion>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
-    <PlatformToolset>v142</PlatformToolset>
+    <PlatformToolset>v143</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>Unicode</CharacterSet>
     <EnableEditAndContinue>false</EnableEditAndContinue>
@@ -28,48 +35,96 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <PropertyGroup>
     <OutDir>$(ProjectDir)..\dist\</OutDir>
-    <IntDir>$(ProjectDir)obj\$(Configuration)\</IntDir>
+    <IntDir>$(ProjectDir)obj\$(Configuration)\$(Platform)\</IntDir>
   </PropertyGroup>
-  <!-- Win7 配置：使用 Win7 復活座標 -->
-  <PropertyGroup Condition="'$(Configuration)'=='Release_Win7'">
-    <OutDir>$(ProjectDir)..\dist\win7\</OutDir>
+
+  <!-- ============================================================ -->
+  <!-- x64 Release 配置 (預設) -->
+  <!-- ============================================================ -->
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <OutDir>$(ProjectDir)..\dist\win64\</OutDir>
   </PropertyGroup>
-  <ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>false</SDLCheck>
-      <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;WINVER=0x0601;_WIN32_WINNT=0x0601;_CRT_SECURE_NO_WARNINGS;_USING_V110_SDK71_;USE_YOLO_DETECTION;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <!-- ✅ 靜態連結：無需 VCRUNTIME140.dll -->
+      <PreprocessorDefinitions>_WIN64;NDEBUG;_WINDOWS;WINVER=0x0A00;_WIN32_WINNT=0x0A00;_CRT_SECURE_NO_WARNINGS;USE_YOLO_DETECTION;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <BufferSecurityCheck>false</BufferSecurityCheck>
       <AdditionalOptions>/utf-8  /wd28159 /wd4819 %(AdditionalOptions)</AdditionalOptions>
-      <DebugInformationFormat Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">ProgramDatabase</DebugInformationFormat>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)imgui;$(ProjectDir)onnxruntime\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <LanguageStandard>stdcpp11</LanguageStandard>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <EntryPointSymbol>mainCRTStartup</EntryPointSymbol>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
-      <!-- ✅ Win7 最小版本：5.01 = Windows XP / Server 2003 SP1 -->
-      <MinimumRequiredVersion>5.01</MinimumRequiredVersion>
-      <!-- 靜態連結 + Winsock + ONNX Runtime -->
+      <MinimumRequiredVersion>6.0</MinimumRequiredVersion>
       <AdditionalDependencies>
         psapi.lib;user32.lib;kernel32.lib;winmm.lib;gdi32.lib;ws2_32.lib;advapi32.lib;wininet.lib;shlwapi.lib;onnxruntime.lib;
         %(AdditionalDependencies)
       </AdditionalDependencies>
       <AdditionalLibraryDirectories>$(ProjectDir)onnxruntime\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <IgnoreAllDefaultLibraries>false</IgnoreAllDefaultLibraries>
+      <TargetMachine>MachineX64</TargetMachine>
     </Link>
-    <!-- 後續建置事件: 複製 ONNX Runtime DLL -->
     <PostBuildEvent>
-      <Command>if exist "$(ProjectDir)onnxruntime\onnxruntime.dll" copy /Y "$(ProjectDir)onnxruntime\onnxruntime.dll" "$(OutDir)" 2&gt;nul</Command>
+      <Command>if exist "$(ProjectDir)onnxruntime\onnxruntime.dll" copy /Y "$(ProjectDir)onnxruntime\onnxruntime.dll" "$(OutDir)" 2&gt;nul
+if exist "$(ProjectDir)onnxruntime_providers_shared.dll" copy /Y "$(ProjectDir)onnxruntime_providers_shared.dll" "$(OutDir)" 2&gt;nul</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
-  <!-- Win7 編譯群組：啟用 Win7 座標 -->
-  <ItemDefinitionGroup Condition="'$(Configuration)'=='Release_Win7'">
+
+  <!-- ============================================================ -->
+  <!-- x64 Win7 配置 (支援 Win7 x64) -->
+  <!-- ============================================================ -->
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release_Win7|x64'">
+    <OutDir>$(ProjectDir)..\dist\win7x64\</OutDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release_Win7|x64'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>false</SDLCheck>
+      <PreprocessorDefinitions>_WIN64;NDEBUG;_WINDOWS;WINVER=0x0601;_WIN32_WINNT=0x0601;_CRT_SECURE_NO_WARNINGS;USE_YOLO_DETECTION;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
+      <AdditionalOptions>/utf-8  /wd28159 /wd4819 %(AdditionalOptions)</AdditionalOptions>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)imgui;$(ProjectDir)onnxruntime\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <LanguageStandard>stdcpp11</LanguageStandard>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <EntryPointSymbol>mainCRTStartup</EntryPointSymbol>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <EnableUAC>false</EnableUAC>
+      <MinimumRequiredVersion>6.1</MinimumRequiredVersion>
+      <AdditionalDependencies>
+        psapi.lib;user32.lib;kernel32.lib;winmm.lib;gdi32.lib;ws2_32.lib;advapi32.lib;wininet.lib;shlwapi.lib;onnxruntime.lib;
+        %(AdditionalDependencies)
+      </AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(ProjectDir)onnxruntime\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <IgnoreAllDefaultLibraries>false</IgnoreAllDefaultLibraries>
+      <TargetMachine>MachineX64</TargetMachine>
+    </Link>
+    <PostBuildEvent>
+      <Command>if exist "$(ProjectDir)onnxruntime\onnxruntime.dll" copy /Y "$(ProjectDir)onnxruntime\onnxruntime.dll" "$(OutDir)" 2&gt;nul
+if exist "$(ProjectDir)onnxruntime_providers_shared.dll" copy /Y "$(ProjectDir)onnxruntime_providers_shared.dll" "$(OutDir)" 2&gt;nul</Command>
+    </PostBuildEvent>
+  </ItemDefinitionGroup>
+
+  <!-- ============================================================ -->
+  <!-- x86 Win32 配置 (保留向後兼容) -->
+  <!-- ============================================================ -->
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <OutDir>$(ProjectDir)..\dist\win32\</OutDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <FunctionLevelLinking>true</FunctionLevelLinking>
@@ -81,6 +136,7 @@
       <AdditionalOptions>/utf-8  /wd28159 /wd4819 %(AdditionalOptions)</AdditionalOptions>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)imgui;$(ProjectDir)onnxruntime\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <LanguageStandard>stdcpp11</LanguageStandard>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -95,11 +151,11 @@
       <AdditionalLibraryDirectories>$(ProjectDir)onnxruntime\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <IgnoreAllDefaultLibraries>false</IgnoreAllDefaultLibraries>
     </Link>
-    <!-- 後續建置事件: 複製 ONNX Runtime DLL -->
     <PostBuildEvent>
       <Command>if exist "$(ProjectDir)onnxruntime\onnxruntime.dll" copy /Y "$(ProjectDir)onnxruntime\onnxruntime.dll" "$(OutDir)" 2&gt;nul</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
+
   <!-- 核心 C++ 檔 -->
   <ItemGroup>
     <ClCompile Include="attack_packet.cpp" />
@@ -117,7 +173,6 @@
     <ClCompile Include="screenshot_assist.cpp" />
     <ClCompile Include="coord_calib.cpp" />
     <ClCompile Include="visionentity.cpp" />
-    <!-- YOLO 偵測器 -->
     <ClCompile Include="yolo_detector.cpp" />
   </ItemGroup>
   <!-- 核心 -->
@@ -137,7 +192,6 @@
     <ClInclude Include="gui_ranbot.h" />
     <ClInclude Include="screenshot.h" />
   </ItemGroup>
-  <!-- NetHook / packet hook 已停用，保留純外部讀取路徑 -->
   <!-- 現有頭文件 -->
   <ItemGroup>
     <ClInclude Include="attack_packet.h" />
@@ -156,20 +210,17 @@
     <ClInclude Include="visionentity.h" />
     <ClInclude Include="embedded_images.h" />
     <ClInclude Include="resource.h" />
-    <!-- YOLO 偵測器 -->
     <ClInclude Include="yolo_detector.h" />
     <ClInclude Include="onnx_config.h" />
+    <ClInclude Include="onnx_loader.h" />
   </ItemGroup>
   <!-- 應用程式圖示資源 -->
   <ItemGroup>
     <ResourceCompile Include="app.rc" />
     <Image Include="app.ico" />
   </ItemGroup>
-  <!-- 圖片已嵌入到 exe (embedded_images.h)，無需複製到輸出目錄 -->
   <ItemGroup>
     <Manifest Include="JyTrainer.manifest" />
   </ItemGroup>
-  <!-- encrypt_offsets.cpp 是獨立開發者工具，不包含在主項目中 -->
-  <!-- 編譯方式：cl /EHsc /O2 encrypt_offsets.cpp advapi32.lib -->
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>
