@@ -366,9 +366,9 @@ static void ClampRelativePoint(int* x, int* y) {
     *y = ClampRelativeCoord(*y, 768);
 }
 static BYTE SkillKeyFromIndex(int index) {
-    index %= 9;  // F1 ~ F9 = 9 keys
+    index %= 10;
     if (index < 0) index = 0;
-    return VK_F1 + index;  // VK_F1 = 0x70 = 112
+    return (index == 9) ? (BYTE)'0' : (BYTE)('1' + index);
 }
 static bool IsTownMap(int mapId) {
     bool found = false;
@@ -2902,15 +2902,15 @@ void BotTick(GameHandle* gh) {
                             s_combatIntent = CombatIntent::SEEKING;
                         }
                     } else {
-                        // 攻擊技能 - 使用 F1~F9 功能鍵
+                        // 攻擊技能 - 使用數字鍵 1-9, 0
                         static int s_visualSkillIndex = 0;
                         int skillCount = g_cfg.attackSkillCount.load();
                         if (skillCount < 1) skillCount = 1;
-                        if (skillCount > 9) skillCount = 9;
+                        if (skillCount > 10) skillCount = 10;
                         int skillIdx = s_visualSkillIndex % skillCount;
-                        BYTE skillKey = VK_F1 + skillIdx;
+                        BYTE skillKey = (skillIdx == 9) ? (BYTE)'0' : (BYTE)('1' + skillIdx);
                         SendKeyDirect(gh->hWnd, skillKey);
-                        Logf("技能", "按鍵: F%d (skillIdx=%d)", skillIdx + 1, skillIdx);
+                        Logf("技能", "按鍵: %c (skillIdx=%d)", skillKey, skillIdx);
                         // 攻擊定點
                         static int s_visualPointIndex = 0;
                         ClickAttackPoint(gh->hWnd, s_visualPointIndex % Coords::ATTACK_SCAN_COUNT);
