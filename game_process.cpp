@@ -673,9 +673,15 @@ ADDR RefreshGameBaseAddress(GameHandle* gh) {
 }
 
 ADDR GetGameBaseAddress(GameHandle* gh) {
-    if (!gh || !gh->hProcess) return 0;
+    if (!gh || !gh->hProcess) {
+        LogGame("[偵測] ❌ GetGameBaseAddress: gh=%p 或 hProcess=NULL", (void*)gh);
+        printf("[偵測] ❌ GetGameBaseAddress: gh=%p 或 hProcess=NULL\n", (void*)gh);
+        return 0;
+    }
 
     bool isWin7 = IsWin7System();
+    printf("[偵測] [%s] 開始取得遊戲主模組基址 (hProcess=%p, pid=%u)...\n",
+        isWin7 ? "Win7" : "Win10/11", gh->hProcess, gh->pid);
     LogGame("[偵測] [%s] 開始取得遊戲主模組基址...", isWin7 ? "Win7" : "Win10/11");
 
     // ── 優先：CreateToolhelp32Snapshot ──
@@ -685,8 +691,10 @@ ADDR GetGameBaseAddress(GameHandle* gh) {
     }
 
     HANDLE snap = CreateToolhelp32Snapshot(snapFlags, gh->pid);
+    printf("[偵測] CreateToolhelp32Snapshot snapFlags=0x%X, pid=%u, result=%p\n", snapFlags, gh->pid, snap);
     if (snap == INVALID_HANDLE_VALUE) {
         DWORD err = GetLastError();
+        printf("[偵測] ❌ CreateToolhelp32Snapshot 失敗 (code=%u)\n", (unsigned int)err);
         LogGame("[偵測] CreateToolhelp32Snapshot 失敗 (code=%u)，改用 EnumProcessModules", (unsigned int)err);
     } else {
         MODULEENTRY32 me = {};
@@ -719,6 +727,7 @@ ADDR GetGameBaseAddress(GameHandle* gh) {
 
     if (EnumProcessModules(gh->hProcess, hMods, sizeof(hMods), &cbNeeded)) {
         int count = cbNeeded / sizeof(HMODULE);
+        printf("[偵測] EnumProcessModules 找到 %d 個模組\n", count);
         LogGame("[偵測] EnumProcessModules 找到 %d 個模組:", count);
 
         for (int i = 0; i < count; i++) {
