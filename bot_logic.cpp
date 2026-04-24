@@ -2698,6 +2698,8 @@ void BotTick(GameHandle* gh) {
             static DWORD s_lastBaseAddrRefresh = 0;
             DWORD now = GetTickCount();
             if (now - s_lastBaseAddrRefresh > 10000) {
+                Logf("Bot", "⚠️ baseAddr=0x%08X, attached=%d，開始刷新...",
+                     gh->baseAddr, gh->attached ? 1 : 0);
                 DWORD newBase = RefreshGameBaseAddress(gh);
                 if (newBase) {
                     Logf("Bot", "✅ baseAddr 刷新成功: 0x%08X -> 0x%08X", gh->baseAddr, newBase);
@@ -2904,9 +2906,9 @@ void BotTick(GameHandle* gh) {
                         static int s_visualSkillIndex = 0;
                         int skillCount = g_cfg.attackSkillCount.load();
                         if (skillCount < 1) skillCount = 1;
+                        if (skillCount > 9) skillCount = 9;
                         int skillIdx = s_visualSkillIndex % skillCount;
                         BYTE skillKey = VK_F1 + skillIdx;
-                        if (skillKey > VK_F9) skillKey = VK_F9;
                         SendKeyDirect(gh->hWnd, skillKey);
                         Logf("技能", "按鍵: F%d (skillIdx=%d)", skillIdx + 1, skillIdx);
                         // 攻擊定點
