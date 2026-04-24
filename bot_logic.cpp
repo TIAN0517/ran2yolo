@@ -1294,10 +1294,23 @@ static PlayerStateReadStatus ReadPlayerStateDetailedInternal(GameHandle* gh, Pla
     out->talismanCount = SafeRPM<int>(gh->hProcess, base + OffsetConfig::QuickSlotTalismanCount(), 0);
     out->mapId = SafeRPM<int>(gh->hProcess, base + OffsetConfig::PlayerMapID(), 0);
 
+    static DWORD s_lastDebugTime = 0;
+    DWORD now = GetTickCount();
+    bool shouldLog = (now - s_lastDebugTime > 5000);
+
     bool posResolved = false;
+    DWORD charAddrForDebug = GetLocalCharPtrExternal(gh);
+    if (shouldLog) {
+        Logf("讀取", "DEBUG: charAddr=0x%08X, IsGoodPtr=%d, base=0x%08X, GLCharObj=0x%08X",
+            charAddrForDebug, IsGoodPtr(charAddrForDebug) ? 1 : 0, base, OffsetConfig::GLCharacterObj());
+    }
+
     if (charAddr && IsGoodPtr(charAddr)) {
         float cx = SafeRPM<float>(gh->hProcess, charAddr + OffsetConfig::CrowPosX(), 0.0f);
         float cz = SafeRPM<float>(gh->hProcess, charAddr + OffsetConfig::CrowPosZ(), 0.0f);
+        if (shouldLog) {
+            Logf("讀取", "DEBUG: from charAddr+0x890: cx=%.1f cz=%.1f", cx, cz);
+        }
         if (HasUsableWorldPos(cx, cz)) {
             out->x = cx;
             out->z = cz;
@@ -1308,6 +1321,9 @@ static PlayerStateReadStatus ReadPlayerStateDetailedInternal(GameHandle* gh, Pla
     if (!posResolved) {
         WORD wx = SafeRPM<WORD>(gh->hProcess, base + OffsetConfig::PlayerPosX(), 0);
         WORD wz = SafeRPM<WORD>(gh->hProcess, base + OffsetConfig::PlayerPosZ(), 0);
+        if (shouldLog) {
+            Logf("讀取", "DEBUG: from base+0x930DF8: wx=%u wz=%u", wx, wz);
+        }
         if (HasUsableWorldPos((float)wx, (float)wz)) {
             out->x = (float)wx;
             out->z = (float)wz;
