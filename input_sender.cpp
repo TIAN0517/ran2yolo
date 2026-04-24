@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstdarg>
 #include <atomic>
+#include <tlhelp32.h>
 
 // ============================================================
 // 簡單 Log 函數（用於平台檢測等早期階段）
@@ -37,6 +38,60 @@ static void Log(const char* tag, const char* fmt, ...) {
 // ============================================================
 static bool s_isWin7 = false;
 static bool s_platformDetected = false;
+
+static bool IsKnownGameExeNameW(const wchar_t* exeName) {
+    if (!exeName || !exeName[0]) return false;
+    return lstrcmpiW(exeName, L"Game.exe") == 0 ||
+           lstrcmpiW(exeName, L"Gf.exe") == 0 ||
+           lstrcmpiW(exeName, L"Ran2.exe") == 0;
+}
+
+static bool IsKnownGameWindow(HWND hWnd) {
+    if (!hWnd || !IsWindow(hWnd)) return false;
+
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hWnd, &pid);
+    if (!pid) return false;
+
+    static HWND s_cachedHwnd = NULL;
+    static DWORD s_cachedPid = 0;
+    static DWORD s_cachedTick = 0;
+    static bool s_cachedOk = false;
+
+    DWORD now = GetTickCount();
+    if (s_cachedHwnd == hWnd && s_cachedPid == pid && now - s_cachedTick < 5000) {
+        return s_cachedOk;
+    }
+
+    bool okGame = false;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap != INVALID_HANDLE_VALUE) {
+        PROCESSENTRY32W pe = {};
+        pe.dwSize = sizeof(pe);
+        for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe)) {
+            if (pe.th32ProcessID == pid) {
+                okGame = IsKnownGameExeNameW(pe.szExeFile);
+                break;
+            }
+        }
+        CloseHandle(snap);
+    }
+
+    s_cachedHwnd = hWnd;
+    s_cachedPid = pid;
+    s_cachedTick = now;
+    s_cachedOk = okGame;
+
+    if (!okGame) {
+        static DWORD s_lastWarn = 0;
+        if (now - s_lastWarn > 5000) {
+            Log("輸入", "⚠️ 拒絕輸入：目標視窗不是 Game.exe/Gf.exe/Ran2.exe (hWnd=%p pid=%u)",
+                hWnd, (unsigned int)pid);
+            s_lastWarn = now;
+        }
+    }
+    return okGame;
+}
 
 void InitPlatformDetect() {
     OSVERSIONINFOW osvi = {};
@@ -202,6 +257,7 @@ static std::atomic<int> s_actionDelay{ 40 };
 
 bool FocusGameWindow(HWND hWnd) {
     if (!hWnd || !IsWindow(hWnd)) return false;
+    if (!IsKnownGameWindow(hWnd)) return false;
 
     if (IsIconic(hWnd)) {
         ShowWindow(hWnd, SW_RESTORE);
@@ -261,10 +317,63 @@ static bool ClientToScreenClamped(HWND hWnd, int cx, int cy, POINT* outPt) {
     return true;
 }
 
+class ScopedCursorGameLock {
+public:
+    explicit ScopedCursorGameLock(HWND hWnd) : oldPt_{}, oldClip_{}, hasOldPt_(false), hasOldClip_(false) {
+        hasOldPt_ = GetCursorPos(&oldPt_) != FALSE;
+        hasOldClip_ = GetClipCursor(&oldClip_) != FALSE;
+
+        RECT rc = {};
+        if (!hWnd || !IsWindow(hWnd) || !GetClientRect(hWnd, &rc)) return;
+        POINT tl = { rc.left, rc.top };
+        POINT br = { rc.right, rc.bottom };
+        if (!ClientToScreen(hWnd, &tl) || !ClientToScreen(hWnd, &br)) return;
+
+        RECT clip = { tl.x, tl.y, br.x, br.y };
+        ClipCursor(&clip);
+    }
+
+    ~ScopedCursorGameLock() {
+        if (hasOldClip_) {
+            ClipCursor(&oldClip_);
+        } else {
+            ClipCursor(NULL);
+        }
+        if (hasOldPt_) {
+            SetCursorPos(oldPt_.x, oldPt_.y);
+        }
+    }
+
+private:
+    POINT oldPt_;
+    RECT oldClip_;
+    bool hasOldPt_;
+    bool hasOldClip_;
+};
+
 // SendMessage 版（相比 mouse_event，更安全、更兼容）
 static void SendMouseClick(HWND hWnd, int cx, int cy, DWORD downFlag, DWORD upFlag) {
     (void)upFlag;
     if (!hWnd || !IsWindow(hWnd)) return;
+    if (!IsKnownGameWindow(hWnd)) return;
+
+    if (!IsWin7Platform()) {
+        POINT pt;
+        if (!RelativeToClientClamped(hWnd, cx, cy, &pt)) return;
+
+        WPARAM downMsg = (downFlag == MOUSEEVENTF_RIGHTDOWN) ? WM_RBUTTONDOWN : WM_LBUTTONDOWN;
+        WPARAM upMsg = (downFlag == MOUSEEVENTF_RIGHTDOWN) ? WM_RBUTTONUP : WM_LBUTTONUP;
+        WPARAM moveMask = (downFlag == MOUSEEVENTF_RIGHTDOWN) ? MK_RBUTTON : MK_LBUTTON;
+        LPARAM lParam = MAKELPARAM((unsigned short)pt.x, (unsigned short)pt.y);
+
+        FocusGameWindow(hWnd);
+        PostMessageA(hWnd, WM_MOUSEMOVE, 0, lParam);
+        PostMessageA(hWnd, (UINT)downMsg, moveMask, lParam);
+        Sleep(12);
+        PostMessageA(hWnd, (UINT)upMsg, 0, lParam);
+        Sleep(10);
+        return;
+    }
 
     // 先平滑移動到目標位置
     if (s_smoothMouseEnabled.load()) {
@@ -302,6 +411,32 @@ static void SendMouseClick(HWND hWnd, int cx, int cy, DWORD downFlag, DWORD upFl
 static void SendMouseClickDirect(HWND hWnd, int cx, int cy, DWORD downFlag, DWORD upFlag) {
     (void)upFlag;
     if (!hWnd || !IsWindow(hWnd)) return;
+    if (!IsKnownGameWindow(hWnd)) return;
+
+    // Win10/11: 優先使用視窗訊息，不移動真實滑鼠，避免影響外部桌面。
+    if (!IsWin7Platform()) {
+        POINT pt;
+        if (!RelativeToClientClamped(hWnd, cx, cy, &pt)) return;
+
+        WPARAM downMsg = (downFlag == MOUSEEVENTF_RIGHTDOWN) ? WM_RBUTTONDOWN : WM_LBUTTONDOWN;
+        WPARAM upMsg = (downFlag == MOUSEEVENTF_RIGHTDOWN) ? WM_RBUTTONUP : WM_LBUTTONUP;
+        WPARAM moveMask = (downFlag == MOUSEEVENTF_RIGHTDOWN) ? MK_RBUTTON : MK_LBUTTON;
+        LPARAM lParam = MAKELPARAM((unsigned short)pt.x, (unsigned short)pt.y);
+
+        FocusGameWindow(hWnd);
+        PostMessageA(hWnd, WM_MOUSEMOVE, 0, lParam);
+        PostMessageA(hWnd, (UINT)downMsg, moveMask, lParam);
+        Sleep(12);
+        PostMessageA(hWnd, (UINT)upMsg, 0, lParam);
+
+        static DWORD s_lastClickLog = 0;
+        DWORD now = GetTickCount();
+        if (now - s_lastClickLog > 3000) {
+            Log("輸入", "📍 [WindowOnly] 點擊 Game.exe client=(%d,%d)", pt.x, pt.y);
+            s_lastClickLog = now;
+        }
+        return;
+    }
 
     // Win7: 使用 SetCursorPos + mouse_event
     if (IsWin7Platform()) {
@@ -315,6 +450,7 @@ static void SendMouseClickDirect(HWND hWnd, int cx, int cy, DWORD downFlag, DWOR
         }
 
         // 直接 SetCursorPos
+        ScopedCursorGameLock cursorLock(hWnd);
         BOOL ret = SetCursorPos(screenPt.x, screenPt.y);
         Sleep(20);
 
@@ -432,8 +568,24 @@ static void SendKeyboardInput(BYTE vk, DWORD extraFlags) {
 
 static void SendKeyboardTap(HWND hWnd, BYTE vk) {
     if (!hWnd || !vk) return;
-    SendKeyboardInput(vk, KEYEVENTF_SCANCODE);
-    Sleep(10);
+    if (!IsWindow(hWnd)) return;
+
+    FocusGameWindow(hWnd);
+    Sleep(IsWin7Platform() ? 50 : 30);
+
+    UINT scan = MapVirtualKeyA(vk, MAPVK_VK_TO_VSC);
+    LPARAM downLP = (scan << 16) | (1 << 30) | (1 << 31);  // keydown with repeat
+    LPARAM upLP = (scan << 16) | (1 << 30) | (1 << 31) | (1 << 29);  // keyup
+
+    if (!IsWin7Platform()) {
+        PostMessageA(hWnd, WM_KEYDOWN, vk, downLP);
+        Sleep(10);
+        PostMessageA(hWnd, WM_KEYUP, vk, upLP);
+    } else {
+        SendMessageA(hWnd, WM_KEYDOWN, vk, downLP);
+        Sleep(10);
+        SendMessageA(hWnd, WM_KEYUP, vk, upLP);
+    }
 }
 
 void SendKeyFast(BYTE vk) {
@@ -445,9 +597,15 @@ void SendKeyFast(BYTE vk) {
 // ============================================================
 void RClickFast(HWND hWnd, int cx, int cy) {
     if (!hWnd || !IsWindow(hWnd)) return;
+    if (!IsKnownGameWindow(hWnd)) return;
+
+    if (!IsWin7Platform()) {
+        SendMouseClickDirect(hWnd, cx, cy, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP);
+        return;
+    }
 
     // 戰鬥施法需要先穩定聚焦，否則技能鍵常常打到別的視窗
-    FocusGameWindow(hWnd);
+    if (!FocusGameWindow(hWnd)) return;
     Sleep(IsWin7Platform() ? 50 : 20);
 
     // 計算客戶區座標（遊戲內 1024x768 範圍）
@@ -471,6 +629,7 @@ void RClickFast(HWND hWnd, int cx, int cy) {
         }
     }
 
+    ScopedCursorGameLock cursorLock(hWnd);
     SetCursorPos(screenPt.x, screenPt.y);
 
     LPARAM lParam = MAKELPARAM((unsigned short)pt.x, (unsigned short)pt.y);
@@ -543,13 +702,16 @@ void ClickAt(HWND hWnd, int cx, int cy) {
 // 拖曳：左鍵按住移動後右鍵釋放（寵物餵食用）
 void DragFeedToPet(HWND hWnd, int fromX, int fromZ, int toX, int toZ) {
     if (!hWnd || !IsWindow(hWnd)) return;
+    if (!IsKnownGameWindow(hWnd)) return;
 
     POINT ptFrom, ptTo;
     if (!ClientToScreenClamped(hWnd, fromX, fromZ, &ptFrom)) return;
     if (!ClientToScreenClamped(hWnd, toX, toZ, &ptTo)) return;
 
-    FocusGameWindow(hWnd);
+    if (!FocusGameWindow(hWnd)) return;
     Sleep(50);
+
+    ScopedCursorGameLock cursorLock(hWnd);
 
     // 移動到起點
     SetCursorPos(ptFrom.x, ptFrom.y);
@@ -597,7 +759,7 @@ void DragFeedToPet(HWND hWnd, int fromX, int fromZ, int toX, int toZ) {
 
 void SendKeyDirect(HWND hWnd, BYTE vk) {
     if (!hWnd || !vk) return;
-    FocusGameWindow(hWnd);
+    if (!FocusGameWindow(hWnd)) return;
     // Win7 兼容：增加等待時間
     Sleep(IsWin7Platform() ? 50 : 30);
     SendKeyboardTap(hWnd, vk);
@@ -658,7 +820,7 @@ void TypeNumber(HWND hWnd, int number) {
 void SendCtrlA(HWND hWnd) {
     if (!hWnd || !IsWindow(hWnd)) return;
 
-    FocusGameWindow(hWnd);
+    if (!FocusGameWindow(hWnd)) return;
     Sleep(IsWin7Platform() ? 50 : 30);
 
     UINT scanCtrl = MapVirtualKeyA(VK_CONTROL, MAPVK_VK_TO_VSC);
