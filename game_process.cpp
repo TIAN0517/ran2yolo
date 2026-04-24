@@ -12,6 +12,11 @@
 #include <cstdio>
 #include <cstdarg>
 #include <winreg.h>
+#include <winternl.h>
+
+#ifndef NT_SUCCESS
+#define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
+#endif
 
 // ============================================================
 // Forward Declaration
@@ -567,11 +572,89 @@ static bool IsGameModule(const wchar_t* modName, const char* fullPath) {
 }
 
 // 驗證模組基址是否合理（32位元遊戲不應該在極高位址）
-static bool IsReasonableBase(DWORD base) {
-    // 0x00400000 is a valid non-ASLR x86 image base. Reject only invalid user-mode ranges.
-    if (base < 0x00400000) return false;
-    if (base >= 0x80000000) return false;
+static bool IsReasonableBase(ADDR base) {
+    // 放寬限制：接受 0x00400000 - 0x7FFFFFFF 之間的任何值
+    // 這個範圍涵蓋了所有 x86 遊戲的載入位址
+    if (base == 0) return false;
+    if (base < 0x00400000) {
+        LogGame("[偵測] IsReasonableBase: base=0x%08X < 0x00400000 (太低)", (DWORD)base);
+        return false;
+    }
+    if (base >= 0x80000000) {
+        LogGame("[偵測] IsReasonableBase: base=0x%08X >= 0x80000000 (太高)", (DWORD)base);
+        return false;
+    }
     return true;
+}
+
+static ADDR TryGetImageBaseFromPeb(GameHandle* gh) {
+    if (!gh || !gh->hProcess) return 0;
+
+    typedef NTSTATUS (NTAPI* NtQueryInformationProcessFn)(
+        HANDLE, PROCESSINFOCLASS, PVOID, ULONG, PULONG);
+
+    HMODULE hNt = GetModuleHandleW(L"ntdll.dll");
+    NtQueryInformationProcessFn ntQuery = hNt
+        ? (NtQueryInformationProcessFn)GetProcAddress(hNt, "NtQueryInformationProcess")
+        : NULL;
+    if (!ntQuery) return 0;
+
+    ULONG_PTR peb32 = 0;
+    NTSTATUS status = ntQuery(gh->hProcess, (PROCESSINFOCLASS)26,
+        &peb32, sizeof(peb32), NULL);  // ProcessWow64Information
+
+    if (NT_SUCCESS(status) && peb32) {
+        DWORD imageBase32 = 0;
+        SIZE_T bytesRead = 0;
+        if (ReadProcessMemory(gh->hProcess, (LPCVOID)(peb32 + 0x08),
+                &imageBase32, sizeof(imageBase32), &bytesRead) &&
+            bytesRead == sizeof(imageBase32)) {
+            ADDR addr = (ADDR)imageBase32;
+            if (IsReasonableBase(addr)) {
+                LogGame("[偵測] ✅ WOW64 PEB ImageBaseAddress = " ADDR_FORMAT, addr);
+                return addr;
+            } else {
+                LogGame("[偵測] WOW64 PEB base=0x%08X 不合理，嘗試其他方法", imageBase32);
+            }
+        } else {
+            LogGame("[偵測] WOW64 PEB ImageBaseAddress 讀取失敗 (err=%u)", GetLastError());
+        }
+    } else if (NT_SUCCESS(status) && !peb32) {
+        LogGame("[偵測] 進程不是 WOW64 (64-bit 進程或無法確定)");
+    } else {
+        LogGame("[偵測] NtQueryInformationProcess WOW64 查詢失敗 (status=0x%08X)", status);
+    }
+
+    // 嘗試讀取 64-bit PEB
+    PROCESS_BASIC_INFORMATION pbi = {};
+    ULONG retLen = 0;
+    status = ntQuery(gh->hProcess, ProcessBasicInformation,
+        &pbi, sizeof(pbi), &retLen);
+    if (NT_SUCCESS(status) && pbi.PebBaseAddress) {
+#ifdef _WIN64
+        ADDR imageBase = 0;
+        SIZE_T bytesRead = 0;
+        if (ReadProcessMemory(gh->hProcess,
+                (LPCVOID)((BYTE*)pbi.PebBaseAddress + 0x10),
+                &imageBase, sizeof(imageBase), &bytesRead) &&
+            bytesRead == sizeof(imageBase) &&
+            imageBase >= 0x10000) {
+            if (IsReasonableBase(imageBase)) {
+                LogGame("[偵測] ✅ Native PEB ImageBaseAddress = " ADDR_FORMAT, imageBase);
+                return imageBase;
+            } else {
+                LogGame("[偵測] Native PEB base=0x%016llX 不合理", imageBase);
+            }
+        } else {
+            LogGame("[偵測] Native PEB ImageBaseAddress 讀取失敗 (err=%u)", GetLastError());
+        }
+#endif
+    } else {
+        LogGame("[偵測] ProcessBasicInformation 查詢失敗 (status=0x%08X)", (unsigned int)status);
+    }
+
+    LogGame("[偵測] PEB ImageBaseAddress fallback 失敗");
+    return 0;
 }
 
 // 前向宣告（RefreshGameBaseAddress 在 GetGameBaseAddress 之前定義）
@@ -640,7 +723,7 @@ ADDR GetGameBaseAddress(GameHandle* gh) {
 
         for (int i = 0; i < count; i++) {
             HMODULE hMod = hMods[i];
-            DWORD base = (DWORD)hMod;
+            ADDR base = (ADDR)(ULONG_PTR)hMod;
             char name[MAX_PATH];
 
             if (GetModuleFileNameExA(gh->hProcess, hMod, name, sizeof(name))) {
@@ -670,12 +753,26 @@ ADDR GetGameBaseAddress(GameHandle* gh) {
         LogGame("[偵測] EnumProcessModules 失敗 (code=%u)", (unsigned int)err);
     }
 
+    // ── Fallback：從目標 PEB 直接讀 ImageBaseAddress（x64 工具讀 32-bit Game.exe 常用）──
+    {
+        ADDR pebBase = TryGetImageBaseFromPeb(gh);
+        if (pebBase) {
+            return pebBase;
+        }
+    }
+
     // ── Fallback：直接嘗試從遊戲記憶體空間搜尋 PE Header ──
     LogGame("[偵測] 直接記憶體搜尋遊戲主模組（最後手段）...");
     MEMORY_BASIC_INFORMATION mbi = {};
     ADDR addr = 0x00400000;  // 典型 32-bit 遊戲載入位址
     while (VirtualQueryEx(gh->hProcess, (LPCVOID)(ULONG_PTR)addr, &mbi, sizeof(mbi)) != 0) {
-        if ((mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE)) &&
+        DWORD protect = mbi.Protect & 0xFF;
+        if (mbi.State == MEM_COMMIT &&
+            !(mbi.Protect & PAGE_GUARD) &&
+            !(mbi.Protect & PAGE_NOACCESS) &&
+            (protect == PAGE_READONLY || protect == PAGE_READWRITE ||
+             protect == PAGE_WRITECOPY || protect == PAGE_EXECUTE_READ ||
+             protect == PAGE_EXECUTE_READWRITE || protect == PAGE_EXECUTE_WRITECOPY) &&
             mbi.RegionSize >= 0x1000) {
             BYTE header[4] = {};
             SIZE_T bytesRead = 0;
@@ -688,7 +785,9 @@ ADDR GetGameBaseAddress(GameHandle* gh) {
                 }
             }
         }
-        addr = (ADDR)mbi.BaseAddress + (ADDR)mbi.RegionSize;
+        ADDR next = (ADDR)mbi.BaseAddress + (ADDR)mbi.RegionSize;
+        if (next <= addr) break;
+        addr = next;
         if (addr >= 0x80000000) break;
     }
 
@@ -793,8 +892,8 @@ bool FindGameProcess(GameHandle* gh) {
         PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_QUERY_INFORMATION,
         // Level 3: 只讀權限（最基本）
         PROCESS_VM_READ | PROCESS_QUERY_INFORMATION,
-        // Level 4: 有限查詢權限（Win7 Session 隔離專用）
-        PROCESS_QUERY_LIMITED_INFORMATION,
+        // Level 4: Win10/11 有些行程只允許 limited query，但仍需要 VM_READ
+        PROCESS_VM_READ | PROCESS_QUERY_LIMITED_INFORMATION,
         // Level 5: 全部權限（最後手段）
         PROCESS_ALL_ACCESS,
     };
