@@ -70,11 +70,38 @@ static bool GetModuleDir(char* outDir, size_t outSize) {
     return false;
 }
 
+static bool FileExistsA2(const char* path);
 static bool GetDefaultKeyPath(const char* fileName, char* outPath, size_t outSize) {
-    char dir[MAX_PATH] = {0};
-    if (!GetModuleDir(dir, sizeof(dir))) return false;
-    if (sprintf_s(outPath, outSize, "%s\\%s", dir, fileName) <= 0) return false;
-    return true;
+    if (!fileName || !outPath || outSize < MAX_PATH) return false;
+
+    char exeDir[MAX_PATH] = {0};
+    char cwdDir[MAX_PATH] = {0};
+    char parentDir[MAX_PATH] = {0};
+
+    if (GetModuleDir(exeDir, sizeof(exeDir))) {
+        if (sprintf_s(outPath, outSize, "%s\\%s", exeDir, fileName) > 0 && FileExistsA2(outPath)) {
+            return true;
+        }
+    }
+
+    if (GetCurrentDirectoryA(MAX_PATH, cwdDir) && cwdDir[0]) {
+        if (sprintf_s(outPath, outSize, "%s\\%s", cwdDir, fileName) > 0 && FileExistsA2(outPath)) {
+            return true;
+        }
+    }
+
+    if (GetModuleDir(exeDir, sizeof(exeDir))) {
+        strcpy_s(parentDir, exeDir);
+        char* slash = strrchr(parentDir, '\\');
+        if (slash && slash > parentDir) {
+            *slash = '\0';
+            if (sprintf_s(outPath, outSize, "%s\\%s", parentDir, fileName) > 0 && FileExistsA2(outPath)) {
+                return true;
+            }
+        }
+    }
+
+    return false;
 }
 
 static bool FileExistsA2(const char* path) {
