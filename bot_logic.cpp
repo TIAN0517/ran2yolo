@@ -1419,6 +1419,12 @@ static PlayerStateReadStatus ReadPlayerStateDetailedInternal(GameHandle* gh, Pla
 }
 static PlayerStateReadStatus ReadPlayerStateDetailed(GameHandle* gh, PlayerState* out,
     char* reason, size_t reasonSize) {
+    static DWORD s_lastCallDiag = 0;
+    if (GetTickCount() - s_lastCallDiag > 3000) {
+        Logf("讀取", "📍 ReadPlayerStateDetailed called: gh=%p hProcess=%p baseAddr=0x%08X",
+            (void*)gh, gh ? (void*)gh->hProcess : NULL, gh ? gh->baseAddr : 0);
+        s_lastCallDiag = GetTickCount();
+    }
     return ReadPlayerStateDetailedInternal(gh, out, reason, reasonSize, true);
 }
 bool ReadPlayerState(GameHandle* gh, PlayerState* out) {
