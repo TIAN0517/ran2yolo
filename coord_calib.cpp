@@ -84,7 +84,7 @@ static Coords::Point GetDefault(CalibIndex idx) {
         case CalibIndex::NPC鳳凰_特派員:       return Coords::NPC鳳凰特派員詹姆士;
         case CalibIndex::NPC鳳凰_對話框購買:  return Coords::NPC鳳凰對話框購買物品;
 
-        case CalibIndex::PET_FOOD:             return Coords::飼料;
+        case CalibIndex::PET_FOOD:             return Coords::食料;
         case CalibIndex::PET_TALISMAN:         return Coords::寵物卡;
 
         case CalibIndex::CENTER_POINT:         return Coords::中心點;

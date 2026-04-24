@@ -83,7 +83,6 @@ static void NormalizeLicenseKey(char* key) {
     for (size_t i = 0; key[i] && out < sizeof(tmp) - 1; i++) {
         unsigned char ch = (unsigned char)key[i];
         if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n') continue;
-        if (ch >= 'a' && ch <= 'z') ch = (unsigned char)(ch - 'a' + 'A');
         tmp[out++] = (char)ch;
     }
     tmp[out] = '\0';
@@ -94,8 +93,13 @@ static DWORD WINAPI LicenseVerifyThreadProc(LPVOID param) {
     char* token = (char*)param;
     if (!token) return 0;
 
+    printf("[License] Thread: verifying token (len=%u)\n", strlen(token));
+
     OfflineLicenseInfo info = {};
     bool success = OfflineLicenseVerifyToken(token, NULL, &info);
+
+    printf("[License] Thread: verify result success=%d valid=%d msg=%s\n",
+        success, info.valid, info.message.c_str());
 
     if (success && info.valid) {
         if (info.days_left >= 0) {
@@ -106,7 +110,6 @@ static DWORD WINAPI LicenseVerifyThreadProc(LPVOID param) {
         strcpy_s(s_licenseMsg, "驗證成功");
         SetLicenseValid(true);
 
-        // 保存到本地緩存
         OfflineLicenseSaveCached(token);
 
         if (!info.permissions.empty()) {
@@ -133,20 +136,26 @@ static DWORD WINAPI LicenseVerifyThreadProc(LPVOID param) {
     }
 
     s_licenseChecked = true;
+    printf("[License] Thread: done, s_licenseChecked=true, s_licenseMsg=%s\n", s_licenseMsg);
     delete[] token;
     return 0;
 }
 
 static void StartLicenseVerifyAsync() {
+    printf("[License] StartLicenseVerifyAsync called, key length=%u\n", strlen(s_licenseKey));
+
     NormalizeLicenseKey(s_licenseKey);
 
     if (strlen(s_licenseKey) == 0) {
         strcpy_s(s_licenseMsg, "請輸入卡密");
         strcpy_s(s_licenseDays, "---");
         SetLicenseValid(false);
+        s_licenseChecked = true;
         UIAddLog("[License] 請先輸入卡密");
         return;
     }
+
+    printf("[License] Normalized key (first 50 chars): %.50s\n", s_licenseKey);
 
     if (!OfflineLicenseLooksLikeToken(s_licenseKey)) {
         strcpy_s(s_licenseMsg, "卡密格式無效");
@@ -157,6 +166,7 @@ static void StartLicenseVerifyAsync() {
     }
 
     strcpy_s(s_licenseMsg, "驗證中...");
+    s_licenseChecked = false;
     UIAddLog("[License] 開始驗證離線卡密...");
 
     char* tokenCopy = new char[strlen(s_licenseKey) + 1];
@@ -165,6 +175,7 @@ static void StartLicenseVerifyAsync() {
     HANDLE hThread = CreateThread(NULL, 0, LicenseVerifyThreadProc, tokenCopy, 0, NULL);
     if (!hThread) {
         strcpy_s(s_licenseMsg, "建立驗證執行緒失敗");
+        s_licenseChecked = true;
         UIAddLog("[License] 建立驗證執行緒失敗");
         delete[] tokenCopy;
         return;
@@ -1267,10 +1278,18 @@ static void PageControl() {
     bool isActive = g_cfg.active.load();
     float w = (ImGui::GetContentRegionAvail().x - 8.0f) * 0.5f;
 
+    static bool s_debugPrinted = false;
+    if (!s_debugPrinted) {
+        printf("[UI] PageControl rendered, isActive=%d\n", isActive ? 1 : 0);
+        s_debugPrinted = true;
+    }
+
     ImGui::PushStyleColor(ImGuiCol_Button, isActive ? ImVec4(0.72f, 0.34f, 0.18f, 1.0f) : ImVec4(0.16f, 0.54f, 0.24f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, isActive ? ImVec4(0.85f, 0.42f, 0.22f, 1.0f) : ImVec4(0.20f, 0.66f, 0.30f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, isActive ? ImVec4(0.92f, 0.48f, 0.25f, 1.0f) : ImVec4(0.24f, 0.74f, 0.34f, 1.0f));
-    if (ImGui::Button(isActive ? "暫  停" : "開  始", ImVec2(w, 36.0f))) {
+    bool btnClicked = ImGui::Button(isActive ? "暫  停" : "開  始", ImVec2(w, 36.0f));
+    if (btnClicked) {
+        printf("[UI] 開始/暫停 按鈕被點擊!\n");
         UIAddLog("[UI] 控制頁按下 %s", isActive ? "暫停" : "開始");
         ToggleBotActive();
     }

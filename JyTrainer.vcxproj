@@ -37,7 +37,6 @@
     <OutDir>$(ProjectDir)..\dist\</OutDir>
     <IntDir>$(ProjectDir)obj\$(Configuration)\$(Platform)\</IntDir>
   </PropertyGroup>
-
   <!-- ============================================================ -->
   <!-- x64 Release 配置 (預設) -->
   <!-- ============================================================ -->
@@ -53,7 +52,7 @@
       <PreprocessorDefinitions>_WIN64;NDEBUG;_WINDOWS;WINVER=0x0A00;_WIN32_WINNT=0x0A00;_CRT_SECURE_NO_WARNINGS;USE_YOLO_DETECTION;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <BufferSecurityCheck>false</BufferSecurityCheck>
-      <AdditionalOptions>/utf-8  /wd28159 /wd4819 %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/utf-8 /wd28159 /wd4819 /wd4244 /wd4312 /wd4311 /wd4302 /wd4477 %(AdditionalOptions)</AdditionalOptions>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)imgui;$(ProjectDir)onnxruntime\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
@@ -65,19 +64,14 @@
       <EnableUAC>false</EnableUAC>
       <MinimumRequiredVersion>6.0</MinimumRequiredVersion>
       <AdditionalDependencies>
-        psapi.lib;user32.lib;kernel32.lib;winmm.lib;gdi32.lib;ws2_32.lib;advapi32.lib;wininet.lib;shlwapi.lib;onnxruntime.lib;
+        psapi.lib;user32.lib;kernel32.lib;winmm.lib;gdi32.lib;ws2_32.lib;advapi32.lib;wininet.lib;shlwapi.lib;
         %(AdditionalDependencies)
       </AdditionalDependencies>
-      <AdditionalLibraryDirectories>$(ProjectDir)onnxruntime\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <IgnoreAllDefaultLibraries>false</IgnoreAllDefaultLibraries>
       <TargetMachine>MachineX64</TargetMachine>
     </Link>
-    <PostBuildEvent>
-      <Command>if exist "$(ProjectDir)onnxruntime\onnxruntime.dll" copy /Y "$(ProjectDir)onnxruntime\onnxruntime.dll" "$(OutDir)" 2&gt;nul
-if exist "$(ProjectDir)onnxruntime_providers_shared.dll" copy /Y "$(ProjectDir)onnxruntime_providers_shared.dll" "$(OutDir)" 2&gt;nul</Command>
-    </PostBuildEvent>
   </ItemDefinitionGroup>
-
   <!-- ============================================================ -->
   <!-- x64 Win7 配置 (支援 Win7 x64) -->
   <!-- ============================================================ -->
@@ -93,7 +87,7 @@ if exist "$(ProjectDir)onnxruntime_providers_shared.dll" copy /Y "$(ProjectDir)o
       <PreprocessorDefinitions>_WIN64;NDEBUG;_WINDOWS;WINVER=0x0601;_WIN32_WINNT=0x0601;_CRT_SECURE_NO_WARNINGS;USE_YOLO_DETECTION;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <BufferSecurityCheck>false</BufferSecurityCheck>
-      <AdditionalOptions>/utf-8  /wd28159 /wd4819 %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/utf-8 /wd28159 /wd4819 /wd4244 /wd4312 /wd4311 /wd4302 /wd4477 %(AdditionalOptions)</AdditionalOptions>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)imgui;$(ProjectDir)onnxruntime\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
@@ -105,19 +99,15 @@ if exist "$(ProjectDir)onnxruntime_providers_shared.dll" copy /Y "$(ProjectDir)o
       <EnableUAC>false</EnableUAC>
       <MinimumRequiredVersion>6.1</MinimumRequiredVersion>
       <AdditionalDependencies>
-        psapi.lib;user32.lib;kernel32.lib;winmm.lib;gdi32.lib;ws2_32.lib;advapi32.lib;wininet.lib;shlwapi.lib;onnxruntime.lib;
+        psapi.lib;user32.lib;kernel32.lib;winmm.lib;gdi32.lib;ws2_32.lib;advapi32.lib;wininet.lib;shlwapi.lib;
         %(AdditionalDependencies)
       </AdditionalDependencies>
-      <AdditionalLibraryDirectories>$(ProjectDir)onnxruntime\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <IgnoreAllDefaultLibraries>false</IgnoreAllDefaultLibraries>
       <TargetMachine>MachineX64</TargetMachine>
+      <Icon>app.ico</Icon>
     </Link>
-    <PostBuildEvent>
-      <Command>if exist "$(ProjectDir)onnxruntime\onnxruntime.dll" copy /Y "$(ProjectDir)onnxruntime\onnxruntime.dll" "$(OutDir)" 2&gt;nul
-if exist "$(ProjectDir)onnxruntime_providers_shared.dll" copy /Y "$(ProjectDir)onnxruntime_providers_shared.dll" "$(OutDir)" 2&gt;nul</Command>
-    </PostBuildEvent>
   </ItemDefinitionGroup>
-
   <!-- ============================================================ -->
   <!-- x86 Win32 配置 (保留向後兼容) -->
   <!-- ============================================================ -->
@@ -133,7 +123,7 @@ if exist "$(ProjectDir)onnxruntime_providers_shared.dll" copy /Y "$(ProjectDir)o
       <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;WINVER=0x0601;_WIN32_WINNT=0x0601;_CRT_SECURE_NO_WARNINGS;_USING_V110_SDK71_;USE_YOLO_DETECTION;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <BufferSecurityCheck>false</BufferSecurityCheck>
-      <AdditionalOptions>/utf-8  /wd28159 /wd4819 %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/utf-8 /wd28159 /wd4819 /wd4244 /wd4312 /wd4311 /wd4302 /wd4477 %(AdditionalOptions)</AdditionalOptions>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)imgui;$(ProjectDir)onnxruntime\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
@@ -145,17 +135,16 @@ if exist "$(ProjectDir)onnxruntime_providers_shared.dll" copy /Y "$(ProjectDir)o
       <EnableUAC>false</EnableUAC>
       <MinimumRequiredVersion>5.01</MinimumRequiredVersion>
       <AdditionalDependencies>
-        psapi.lib;user32.lib;kernel32.lib;winmm.lib;gdi32.lib;ws2_32.lib;advapi32.lib;wininet.lib;shlwapi.lib;onnxruntime.lib;
+        psapi.lib;user32.lib;kernel32.lib;winmm.lib;gdi32.lib;ws2_32.lib;advapi32.lib;wininet.lib;shlwapi.lib;
         %(AdditionalDependencies)
       </AdditionalDependencies>
-      <AdditionalLibraryDirectories>$(ProjectDir)onnxruntime\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <IgnoreAllDefaultLibraries>false</IgnoreAllDefaultLibraries>
     </Link>
     <PostBuildEvent>
       <Command>if exist "$(ProjectDir)onnxruntime\onnxruntime.dll" copy /Y "$(ProjectDir)onnxruntime\onnxruntime.dll" "$(OutDir)" 2&gt;nul</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
-
   <!-- 核心 C++ 檔 -->
   <ItemGroup>
     <ClCompile Include="attack_packet.cpp" />
@@ -174,6 +163,8 @@ if exist "$(ProjectDir)onnxruntime_providers_shared.dll" copy /Y "$(ProjectDir)o
     <ClCompile Include="coord_calib.cpp" />
     <ClCompile Include="visionentity.cpp" />
     <ClCompile Include="yolo_detector.cpp" />
+    <ClCompile Include="onnx_loader.cpp" />
+    <ClCompile Include="embedded_resources.cpp" />
   </ItemGroup>
   <!-- 核心 -->
   <ItemGroup>
@@ -213,11 +204,19 @@ if exist "$(ProjectDir)onnxruntime_providers_shared.dll" copy /Y "$(ProjectDir)o
     <ClInclude Include="yolo_detector.h" />
     <ClInclude Include="onnx_config.h" />
     <ClInclude Include="onnx_loader.h" />
+    <ClInclude Include="embed_dlls.h" />
+    <ClInclude Include="embedded_resources.h" />
   </ItemGroup>
   <!-- 應用程式圖示資源 -->
   <ItemGroup>
-    <ResourceCompile Include="app.rc" />
     <Image Include="app.ico" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="license_admin_gui.cpp" />
+    <ClCompile Include="license_admin_gui_main.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="app.rc" />
   </ItemGroup>
   <ItemGroup>
     <Manifest Include="JyTrainer.manifest" />

@@ -1,3 +1,9 @@
 #include "resource.h"
 
+// 应用程序图标资源
 IDI_APP_ICON ICON "app.ico"
+    
+// ONNX Runtime 动态库资源
+IDR_ONNXRUNTIME_DLL RCDATA "onnxruntime.dll"
+IDR_ONNXRUNTIME_PROV RCDATA "onnxruntime_providers_shared.dll"
+

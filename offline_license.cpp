@@ -28,6 +28,7 @@
 #endif
 
 static const char* kOfflineLicensePrefix = "JYLIC1|";
+static const char* kOfflineLicenseV2Prefix = "JYLIC2|";
 static const char* kDefaultPublicKeyFile = "license_public.blob";
 static const char* kDefaultPrivateKeyFile = "license_private.blob";
 
@@ -52,7 +53,8 @@ static std::string StripWhitespace(const char* text) {
 
 bool OfflineLicenseLooksLikeToken(const char* text) {
     std::string compact = StripWhitespace(text);
-    return compact.rfind(kOfflineLicensePrefix, 0) == 0;
+    return compact.rfind(kOfflineLicensePrefix, 0) == 0 ||
+        compact.rfind(kOfflineLicenseV2Prefix, 0) == 0;
 }
 
 static bool GetModuleDir(char* outDir, size_t outSize) {
@@ -236,6 +238,53 @@ static bool HashSha256(const BYTE* data, size_t dataSize, std::vector<BYTE>* out
     }
 
     *outHash = hash;
+    return true;
+}
+
+static bool HashMd5Hex8(const BYTE* data, size_t dataSize, char outHex8[9], char* err, size_t errSize) {
+    if (!data || !outHex8) return false;
+    outHex8[0] = '\0';
+
+    BCRYPT_ALG_HANDLE hAlg = NULL;
+    BCRYPT_HASH_HANDLE hHash = NULL;
+    DWORD objLen = 0;
+    DWORD cbData = 0;
+    DWORD hashLen = 0;
+    std::vector<BYTE> obj;
+    std::vector<BYTE> hash;
+    NTSTATUS status;
+
+    status = BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_MD5_ALGORITHM, NULL, 0);
+    if (status < 0) {
+        SetErr(err, errSize, "開啟 MD5 provider 失敗: 0x%08X", (unsigned int)status);
+        return false;
+    }
+
+    status = BCryptGetProperty(hAlg, BCRYPT_OBJECT_LENGTH, (PUCHAR)&objLen, sizeof(objLen), &cbData, 0);
+    if (status >= 0) {
+        status = BCryptGetProperty(hAlg, BCRYPT_HASH_LENGTH, (PUCHAR)&hashLen, sizeof(hashLen), &cbData, 0);
+    }
+    if (status < 0) {
+        SetErr(err, errSize, "取得 MD5 屬性失敗: 0x%08X", (unsigned int)status);
+        BCryptCloseAlgorithmProvider(hAlg, 0);
+        return false;
+    }
+
+    obj.resize(objLen);
+    hash.resize(hashLen);
+    status = BCryptCreateHash(hAlg, &hHash, obj.data(), objLen, NULL, 0, 0);
+    if (status >= 0) status = BCryptHashData(hHash, (PUCHAR)data, (ULONG)dataSize, 0);
+    if (status >= 0) status = BCryptFinishHash(hHash, hash.data(), hashLen, 0);
+
+    if (hHash) BCryptDestroyHash(hHash);
+    BCryptCloseAlgorithmProvider(hAlg, 0);
+
+    if (status < 0 || hash.size() < 4) {
+        SetErr(err, errSize, "MD5 計算失敗: 0x%08X", (unsigned int)status);
+        return false;
+    }
+
+    sprintf_s(outHex8, 9, "%02x%02x%02x%02x", hash[0], hash[1], hash[2], hash[3]);
     return true;
 }
 
@@ -441,6 +490,65 @@ bool OfflineLicenseIssueToken(const char* privateKeyPath, const char* hwid, int 
     return true;
 }
 
+static bool OfflineLicenseVerifyV2Token(const std::string& compact, const char* hwid, OfflineLicenseInfo* outInfo) {
+    std::vector<std::string> parts;
+    SplitTokenPreserveEmpty(compact, &parts);
+    if (parts.size() != 5) {
+        if (outInfo) outInfo->message = "授權欄位數量錯誤";
+        return false;
+    }
+
+    std::string payload = parts[0] + "|" + parts[1] + "|" + parts[2] + "|" + parts[3];
+    char expectedChecksum[9] = {0};
+    char err[128] = {0};
+    if (!HashMd5Hex8((const BYTE*)payload.data(), payload.size(), expectedChecksum, err, sizeof(err))) {
+        if (outInfo) outInfo->message = err[0] ? err : "授權校驗失敗";
+        return false;
+    }
+
+    if (_stricmp(parts[4].c_str(), expectedChecksum) != 0) {
+        if (outInfo) outInfo->message = "授權校驗碼錯誤";
+        return false;
+    }
+
+    const char* expectedHwid = (hwid && hwid[0]) ? hwid : GetMachineHWID();
+    if (expectedHwid && expectedHwid[0] && _stricmp(parts[1].c_str(), expectedHwid) != 0) {
+        if (outInfo) {
+            outInfo->message = "HWID 不匹配";
+            outInfo->hwid = parts[1];
+            outInfo->license_id = parts[3];
+        }
+        return false;
+    }
+
+    ULONGLONG expires = _strtoui64(parts[2].c_str(), NULL, 10);
+    ULONGLONG now = (ULONGLONG)time(NULL);
+    if (expires <= now) {
+        if (outInfo) {
+            outInfo->message = "授權已過期";
+            outInfo->hwid = parts[1];
+            outInfo->license_id = parts[3];
+            outInfo->expires_at = FormatUtcTimeULongLong(expires);
+            outInfo->days_left = 0;
+        }
+        return false;
+    }
+
+    if (outInfo) {
+        outInfo->success = true;
+        outInfo->valid = true;
+        outInfo->license_id = parts[3];
+        outInfo->hwid = parts[1];
+        outInfo->expires_at = FormatUtcTimeULongLong(expires);
+        outInfo->permissions = SplitCsv("basic");
+        outInfo->message = "離線授權驗證成功";
+        ULONGLONG remainSec = expires - now;
+        outInfo->days_left = (int)((remainSec + 86399ULL) / 86400ULL);
+        if (outInfo->days_left < 0) outInfo->days_left = 0;
+    }
+    return true;
+}
+
 bool OfflineLicenseVerifyToken(const char* token, const char* hwid, OfflineLicenseInfo* outInfo) {
     if (outInfo) {
         outInfo->success = false;
@@ -454,6 +562,10 @@ bool OfflineLicenseVerifyToken(const char* token, const char* hwid, OfflineLicen
     }
 
     std::string compact = StripWhitespace(token);
+    if (compact.rfind(kOfflineLicenseV2Prefix, 0) == 0) {
+        return OfflineLicenseVerifyV2Token(compact, hwid, outInfo);
+    }
+
     if (compact.rfind(kOfflineLicensePrefix, 0) != 0) {
         if (outInfo) outInfo->message = "授權格式錯誤";
         return false;
@@ -511,7 +623,8 @@ bool OfflineLicenseVerifyToken(const char* token, const char* hwid, OfflineLicen
     ULONGLONG expires = _strtoui64(parts[4].c_str(), NULL, 10);
     ULONGLONG now = (ULONGLONG)time(NULL);
 
-    if (hwid && hwid[0] && _stricmp(parts[2].c_str(), hwid) != 0) {
+    const char* expectedHwid = (hwid && hwid[0]) ? hwid : GetMachineHWID();
+    if (expectedHwid && expectedHwid[0] && _stricmp(parts[2].c_str(), expectedHwid) != 0) {
         if (outInfo) {
             outInfo->message = "HWID 不匹配";
             outInfo->hwid = parts[2];
@@ -630,13 +743,8 @@ const char* GetMachineHWID() {
 // 載入本地緩存的卡密（從 license_token.dat）
 static const char* kCachedTokenFile = "license_token.dat";
 
-bool OfflineLicenseLoadCached(char* outToken, size_t outSize) {
-    if (!outToken || outSize < 64) return false;
-    outToken[0] = '\0';
-
-    char path[MAX_PATH] = {0};
-    if (!GetModuleDir(path, sizeof(path))) return false;
-    if (sprintf_s(path + strlen(path), sizeof(path) - strlen(path), "\\%s", kCachedTokenFile) <= 0) return false;
+static bool TryLoadCachedTokenFile(const char* path, char* outToken, size_t outSize) {
+    if (!path || !outToken || outSize < 64) return false;
 
     FILE* f = NULL;
     if (fopen_s(&f, path, "r") != 0 || !f) return false;
@@ -652,12 +760,10 @@ bool OfflineLicenseLoadCached(char* outToken, size_t outSize) {
 
     if (pos == 0) return false;
 
-    // 去除空白
     char* end = buf + pos;
     while (end > buf && (end[-1] == ' ' || end[-1] == '\t')) --end;
     *end = '\0';
 
-    // 去除開頭空白
     char* start = buf;
     while (*start == ' ' || *start == '\t') ++start;
 
@@ -665,6 +771,32 @@ bool OfflineLicenseLoadCached(char* outToken, size_t outSize) {
 
     strncpy_s(outToken, outSize, start, _TRUNCATE);
     return true;
+}
+
+bool OfflineLicenseLoadCached(char* outToken, size_t outSize) {
+    if (!outToken || outSize < 64) return false;
+    outToken[0] = '\0';
+
+    char moduleDir[MAX_PATH] = {0};
+    if (!GetModuleDir(moduleDir, sizeof(moduleDir))) return false;
+
+    char path[MAX_PATH] = {0};
+    if (sprintf_s(path, sizeof(path), "%s\\%s", moduleDir, kCachedTokenFile) > 0 &&
+        TryLoadCachedTokenFile(path, outToken, outSize)) {
+        return true;
+    }
+
+    char* slash = strrchr(moduleDir, '\\');
+    if (!slash) slash = strrchr(moduleDir, '/');
+    if (slash) {
+        *slash = '\0';
+        if (sprintf_s(path, sizeof(path), "%s\\%s", moduleDir, kCachedTokenFile) > 0 &&
+            TryLoadCachedTokenFile(path, outToken, outSize)) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 // 保存卡密到本地緩存

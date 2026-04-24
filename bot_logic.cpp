@@ -1079,6 +1079,29 @@ void InitBotLogic() {
         UIAddLog("[YOLO] 偵測器初始化失敗，將使用像素掃描");
     }
 
+    // ── 啟動時自動載入並驗證卡密（如果有的話）──
+    char cachedToken[4096] = {};
+    if (OfflineLicenseLoadCached(cachedToken, sizeof(cachedToken))) {
+        Logf("認證", "發現本地緩存卡密，正在驗證...");
+        UIAddLog("[License] 載入本地緩存，自動驗證中");
+
+        OfflineLicenseInfo info = {};
+        bool ok = OfflineLicenseVerifyToken(cachedToken, NULL, &info);
+        if (ok && info.valid) {
+            g_licenseValid.store(true);
+            Logf("認證", "✅ 自動驗證成功，剩餘 %d 天", info.days_left);
+            UIAddLog("[License] 驗證成功，剩餘 %d 天", info.days_left);
+        } else {
+            g_licenseValid.store(false);
+            const char* msg = info.message.empty() ? "驗證失敗" : info.message.c_str();
+            Logf("認證", "❌ 自動驗證失敗: %s", msg);
+            UIAddLog("[License] 驗證失敗: %s", msg);
+        }
+    } else {
+        Log("認證", "無本地緩存卡密，請在 UI 輸入卡密");
+        UIAddLog("[License] 無本地緩存，請輸入卡密");
+    }
+
     Log("系統", "Bot 邏輯初始化完成");
 }
 void ShutdownBotLogic() {
@@ -1194,7 +1217,7 @@ static PlayerStateReadStatus ReadPlayerStateDetailedInternal(GameHandle* gh, Pla
     out->state = (BotState)g_State.load();
     if (reason && reasonSize > 0) reason[0] = '\0';
 
-    if (!gh || !gh->hProcess || !gh->baseAddr) {
+    if (!gh || !gh->hProcess) {
         static DWORD s_lastDiag = 0;
         if (GetTickCount() - s_lastDiag > 3000) {
             Logf("讀取", "❌ ReadPlayerState: gh=%p hProcess=%p baseAddr=0x%08X",
@@ -1205,6 +1228,28 @@ static PlayerStateReadStatus ReadPlayerStateDetailedInternal(GameHandle* gh, Pla
             _snprintf_s(reason, reasonSize, _TRUNCATE, "GameHandle 未就緒");
         }
         return PlayerStateReadStatus::READ_FAILED;
+    }
+
+    // ── baseAddr==0 時的兜底 refresh ──
+    if (!gh->baseAddr) {
+        static DWORD s_lastBaseRefreshDiag = 0;
+        DWORD refreshed = RefreshGameBaseAddress(gh);
+        if (refreshed) {
+            gh->baseAddr = refreshed;
+            gh->attached = true;
+            if (reason && reasonSize > 0) {
+                _snprintf_s(reason, reasonSize, _TRUNCATE, "baseAddr 刷新成功: 0x%08X", refreshed);
+            }
+            if (GetTickCount() - s_lastBaseRefreshDiag > 3000) {
+                Logf("讀取", "✅ baseAddr 刷新成功: 0x%08X", refreshed);
+                s_lastBaseRefreshDiag = GetTickCount();
+            }
+        } else {
+            if (reason && reasonSize > 0) {
+                _snprintf_s(reason, reasonSize, _TRUNCATE, "baseAddr 刷新失敗");
+            }
+            return PlayerStateReadStatus::READ_FAILED;
+        }
     }
 
     DWORD base = gh->baseAddr;
@@ -2103,14 +2148,14 @@ static void DoPetFeedTick(HWND hWnd) {
     s_lastPetFeedTime = now;
 
     Log("寵物", "[餵食] 開始餵食...");
-    // 1. 點擊飼料（拿起）
-    ClickAtDirect(hWnd, Coords::飼料().x, Coords::飼料().z);
+    // 1. 點擊食料（拿起）
+    ClickAtDirect(hWnd, Coords::食料.x, Coords::食料.z);
     Sleep(200);
     // 2. 拖到寵物卡上方，右鍵使用餵食
-    DragFeedToPet(hWnd, Coords::飼料().x, Coords::飼料().z, Coords::寵物卡().x, Coords::寵物卡().z);
+    DragFeedToPet(hWnd, Coords::食料.x, Coords::食料.z, Coords::寵物卡.x, Coords::寵物卡.z);
     Sleep(200);
     // 3. 左鍵放回原位
-    ClickAtDirect(hWnd, Coords::飼料().x, Coords::飼料().z);
+    ClickAtDirect(hWnd, Coords::食料.x, Coords::食料.z);
     Sleep(100);
     Log("寵物", "[餵食] 完成");
 }
@@ -2662,20 +2707,21 @@ void BotTick(GameHandle* gh) {
 
     // 始終嘗試獲取最新的全域句柄（即使傳入的 gh 有效）
     GameHandle tmpGh = GetGameHandle();
-    if (tmpGh.attached && tmpGh.hProcess) {
+    // 修復：只要 hProcess 有效就同步，baseAddr=0 時仍需同步以便後續刷新
+    if (tmpGh.hProcess) {
         s_ghFallback = tmpGh;
         gh = &s_ghFallback;
         if (nowGh - s_lastGhLog > 5000) {
-            Logf("Bot", "✅ gh 同步: hProcess=%p base=0x%08X hWnd=%p",
-                s_ghFallback.hProcess, s_ghFallback.baseAddr, s_ghFallback.hWnd);
+            Logf("Bot", "✅ gh 同步: hProcess=%p base=0x%08X attached=%d hWnd=%p",
+                s_ghFallback.hProcess, s_ghFallback.baseAddr, s_ghFallback.attached, s_ghFallback.hWnd);
             s_lastGhLog = nowGh;
         }
-    } else if (!gh || !gh->attached) {
+    } else if (!gh || !gh->hProcess) {
         // 沒有有效的 gh
         static DWORD s_lastGhFailLog = 0;
         if (nowGh - s_lastGhFailLog > 5000) {
-            Logf("Bot", "❌ gh 無效: 參數=%p 全域 attached=%d hProcess=%p",
-                gh, tmpGh.attached, tmpGh.hProcess);
+            Logf("Bot", "❌ gh 無效: 參數=%p hProcess=%p 全域 hProcess=%p",
+                gh, gh ? gh->hProcess : 0, tmpGh.hProcess);
             s_lastGhFailLog = nowGh;
         }
     }
@@ -2934,9 +2980,10 @@ void BotTick(GameHandle* gh) {
                     HWND hWnd = gh->hWnd;
                     int cliW = 0, cliH = 0;
                     Coords::GetGameWindowSize(hWnd, &cliW, &cliH);
-                    Coords::Point revivePt = (mode == 0) ? Coords::歸魂珠復活()
-                                          : (mode == 1) ? Coords::復活按鈕()
-                                          : Coords::基本復活();
+                    Coords::Point revivePt;
+                    if (mode == 0) revivePt = Coords::歸魂珠復活;
+                    else if (mode == 1) revivePt = Coords::復活按鈕;
+                    else revivePt = Coords::基本復活;
                     int clientX = cliW > 0 ? (revivePt.x * cliW) / 1024 : 0;
                     int clientY = cliH > 0 ? (revivePt.z * cliH) / 768 : 0;
                     Logf("狀態機", "[視覺DEAD] 嘗試復活: mode=%d retry=%d hWnd=%p 客戶=%dx%d 遊戲=(%d,%d) → 像素=(%d,%d)",
@@ -2965,14 +3012,14 @@ void BotTick(GameHandle* gh) {
 
                     if (mode == 0) {
                         if (s_reviveRetryCount >= 4) {
-                            TryReviveClick("resurrection.png", CalibIndex::REVIVE_基本, Coords::基本復活().x, Coords::基本復活().z);
+                            TryReviveClick("resurrection.png", CalibIndex::REVIVE_基本, Coords::基本復活.x, Coords::基本復活.z);
                         } else {
-                            TryReviveClick("Soul_Returning_Pearl.png", CalibIndex::REVIVE_SOUL_PEARL, Coords::歸魂珠復活().x, Coords::歸魂珠復活().z);
+                            TryReviveClick("Soul_Returning_Pearl.png", CalibIndex::REVIVE_SOUL_PEARL, Coords::歸魂珠復活.x, Coords::歸魂珠復活.z);
                         }
                     } else if (mode == 1) {
-                        TryReviveClick("resurrection.png", CalibIndex::REVIVE原地, Coords::復活按鈕().x, Coords::復活按鈕().z);
+                        TryReviveClick("resurrection.png", CalibIndex::REVIVE原地, Coords::復活按鈕.x, Coords::復活按鈕.z);
                     } else {
-                        TryReviveClick("resurrection.png", CalibIndex::REVIVE_基本, Coords::基本復活().x, Coords::基本復活().z);
+                        TryReviveClick("resurrection.png", CalibIndex::REVIVE_基本, Coords::基本復活.x, Coords::基本復活.z);
                     }
 
                     s_reviveClicked = true;
@@ -3165,9 +3212,10 @@ void BotTick(GameHandle* gh) {
             }
             if (!s_reviveClicked) {
                 int mode = g_cfg.revive_mode.load();
-                Coords::Point revivePt = (mode == 0) ? Coords::歸魂珠復活()
-                                      : (mode == 1) ? Coords::復活按鈕()
-                                      : Coords::基本復活();
+                Coords::Point revivePt;
+                if (mode == 0) revivePt = Coords::歸魂珠復活;
+                else if (mode == 1) revivePt = Coords::復活按鈕;
+                else revivePt = Coords::基本復活;
 
                 // 調試：顯示視窗大小和座標轉換
                 RECT rc = {};
@@ -3358,14 +3406,14 @@ void BotTick(GameHandle* gh) {
 
                 if (mode == 0) {
                     if (s_reviveRetryCount >= 4) {
-                        TryReviveClick("resurrection.png", CalibIndex::REVIVE_基本, Coords::基本復活().x, Coords::基本復活().z);
+                        TryReviveClick("resurrection.png", CalibIndex::REVIVE_基本, Coords::基本復活.x, Coords::基本復活.z);
                     } else {
-                        TryReviveClick("Soul_Returning_Pearl.png", CalibIndex::REVIVE_SOUL_PEARL, Coords::歸魂珠復活().x, Coords::歸魂珠復活().z);
+                        TryReviveClick("Soul_Returning_Pearl.png", CalibIndex::REVIVE_SOUL_PEARL, Coords::歸魂珠復活.x, Coords::歸魂珠復活.z);
                     }
                 } else if (mode == 1) {
-                    TryReviveClick("resurrection.png", CalibIndex::REVIVE原地, Coords::復活按鈕().x, Coords::復活按鈕().z);
+                    TryReviveClick("resurrection.png", CalibIndex::REVIVE原地, Coords::復活按鈕.x, Coords::復活按鈕.z);
                 } else {
-                    TryReviveClick("resurrection.png", CalibIndex::REVIVE_基本, Coords::基本復活().x, Coords::基本復活().z);
+                    TryReviveClick("resurrection.png", CalibIndex::REVIVE_基本, Coords::基本復活.x, Coords::基本復活.z);
                 }
                 s_reviveClicked = true;
                 s_reviveRetryCount++;

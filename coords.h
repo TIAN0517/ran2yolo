@@ -153,7 +153,7 @@ namespace Coords
     // 寵物餵食（Win7 實測座標）
     // ============================================================
     static constexpr Point 寵物卡 = Point(775, 180);
-    static constexpr Point 飼料 = Point(820, 180);
+    static constexpr Point 食料 = Point(820, 180);
 
     // ============================================================
     // 戰鬥圓心 / 固定掃打點（Win7 實測座標）
