@@ -366,9 +366,9 @@ static void ClampRelativePoint(int* x, int* y) {
     *y = ClampRelativeCoord(*y, 768);
 }
 static BYTE SkillKeyFromIndex(int index) {
-    index %= 10;
+    index %= 9;  // F1 ~ F9 = 9 keys
     if (index < 0) index = 0;
-    return (index == 9) ? (BYTE)'0' : (BYTE)('1' + index);
+    return VK_F1 + index;  // VK_F1 = 0x70 = 112
 }
 static bool IsTownMap(int mapId) {
     bool found = false;
@@ -1075,6 +1075,11 @@ void InitBotLogic() {
         extern void SetYoloThresholds(float, float);
         SetYoloThresholds(conf, nms);
         UIAddLog("[YOLO] 偵測器已就緒 (conf=%.2f, nms=%.2f)", conf, nms);
+        if (!g_cfg.use_yolo_mode.load()) {
+            g_cfg.use_yolo_mode.store(true);
+            g_cfg.use_visual_mode.store(false);
+            UIAddLog("[YOLO] 已自動啟用 YOLO 優先掃描");
+        }
     } else {
         UIAddLog("[YOLO] 偵測器初始化失敗，將使用像素掃描");
     }
@@ -1137,8 +1142,12 @@ static InventoryScanStatus ScanInventoryDetailed(GameHandle* gh, std::vector<Inv
 
     if (!IsGoodPtr(s_invBase)) {
         DWORD now = GetTickCount();
-        if (now - s_lastInventoryDiagLog > 3000) {
-            Log("背包", "❌ 背包基底無效，跳過背包掃描");
+        const bool relativeOnly = s_relativeOnlyCombatMode.load();
+        DWORD logInterval = relativeOnly ? 15000 : 3000;
+        if (now - s_lastInventoryDiagLog > logInterval) {
+            Log("背包", relativeOnly
+                ? "⚠️ 純相對模式：背包基底暫不可用，跳過背包掃描"
+                : "❌ 背包基底無效，跳過背包掃描");
             s_lastInventoryDiagLog = now;
         }
         return InventoryScanStatus::INVALID_BASE;
@@ -1153,8 +1162,12 @@ static InventoryScanStatus ScanInventoryDetailed(GameHandle* gh, std::vector<Inv
         }
         if (!IsGoodPtr(s_invBase)) {
             DWORD now = GetTickCount();
-            if (now - s_lastInventoryDiagLog > 3000) {
-                Log("背包", "❌ 背包基底刷新失敗，無法辨識背包內容");
+            const bool relativeOnly = s_relativeOnlyCombatMode.load();
+            DWORD logInterval = relativeOnly ? 15000 : 3000;
+            if (now - s_lastInventoryDiagLog > logInterval) {
+                Log("背包", relativeOnly
+                    ? "⚠️ 純相對模式：背包基底刷新失敗，暫停背包掃描"
+                    : "❌ 背包基底刷新失敗，無法辨識背包內容");
                 s_lastInventoryDiagLog = now;
             }
             return InventoryScanStatus::INVALID_BASE;
@@ -1296,13 +1309,15 @@ static PlayerStateReadStatus ReadPlayerStateDetailedInternal(GameHandle* gh, Pla
 
     static DWORD s_lastDebugTime = 0;
     DWORD now = GetTickCount();
-    bool shouldLog = (now - s_lastDebugTime > 5000);
+    DWORD debugInterval = s_relativeOnlyCombatMode.load() ? 15000 : 5000;
+    bool shouldLog = (now - s_lastDebugTime > debugInterval);
 
     bool posResolved = false;
     DWORD charAddrForDebug = GetLocalCharPtrExternal(gh);
     if (shouldLog) {
         Logf("讀取", "DEBUG: charAddr=0x%08X, IsGoodPtr=%d, base=0x%08X, GLCharObj=0x%08X",
             charAddrForDebug, IsGoodPtr(charAddrForDebug) ? 1 : 0, base, OffsetConfig::GLCharacterObj());
+        s_lastDebugTime = now;
     }
 
     if (charAddr && IsGoodPtr(charAddr)) {
@@ -1323,6 +1338,7 @@ static PlayerStateReadStatus ReadPlayerStateDetailedInternal(GameHandle* gh, Pla
         WORD wz = SafeRPM<WORD>(gh->hProcess, base + OffsetConfig::PlayerPosZ(), 0);
         if (shouldLog) {
             Logf("讀取", "DEBUG: from base+0x930DF8: wx=%u wz=%u", wx, wz);
+            s_lastDebugTime = now;
         }
         if (HasUsableWorldPos((float)wx, (float)wz)) {
             out->x = (float)wx;
@@ -1392,8 +1408,11 @@ static PlayerStateReadStatus ReadPlayerStateDetailedInternal(GameHandle* gh, Pla
             strncpy_s(reason, reasonSize, localReason, _TRUNCATE);
         }
         DWORD now = GetTickCount();
-        if (now - s_lastInvalidStateLog > 3000) {
-            Logf("讀取", "⚠️ 玩家資料無效: %s [GLChar=0x%08X Map=%d x=%.1f z=%.1f HP=%d/%d Inv=%s Offset=%s MapRVA=0x%08X PosXRVA=0x%08X PosZRVA=0x%08X]",
+        const bool relativeOnly = s_relativeOnlyCombatMode.load();
+        DWORD logInterval = relativeOnly ? 15000 : 3000;
+        if (now - s_lastInvalidStateLog > logInterval) {
+            Logf("讀取", "%s: %s [GLChar=0x%08X Map=%d x=%.1f z=%.1f HP=%d/%d Inv=%s Offset=%s MapRVA=0x%08X PosXRVA=0x%08X PosZRVA=0x%08X]",
+                relativeOnly ? "⚠️ 純相對模式：記憶體座標暫不可用" : "⚠️ 玩家資料無效",
                 localReason, charAddr, out->mapId, out->x, out->z, out->hp, out->maxHp,
                 GetInventoryScanStatusName(invStatus), OffsetConfig::GetLoadSource(),
                 OffsetConfig::PlayerMapID(), OffsetConfig::PlayerPosX(), OffsetConfig::PlayerPosZ());
@@ -1404,7 +1423,8 @@ static PlayerStateReadStatus ReadPlayerStateDetailedInternal(GameHandle* gh, Pla
 
     if (invStatus == InventoryScanStatus::INVALID_BASE || invStatus == InventoryScanStatus::INVALID_HANDLE) {
         DWORD now = GetTickCount();
-        if (now - s_lastInventoryDiagLog > 5000) {
+        DWORD logInterval = s_relativeOnlyCombatMode.load() ? 15000 : 5000;
+        if (now - s_lastInventoryDiagLog > logInterval) {
             Logf("讀取", "⚠️ 背包狀態未知 (%s)，戰鬥可繼續，補給判定暫停",
                 GetInventoryScanStatusName(invStatus));
             s_lastInventoryDiagLog = now;
@@ -1420,10 +1440,12 @@ static PlayerStateReadStatus ReadPlayerStateDetailedInternal(GameHandle* gh, Pla
 static PlayerStateReadStatus ReadPlayerStateDetailed(GameHandle* gh, PlayerState* out,
     char* reason, size_t reasonSize) {
     static DWORD s_lastCallDiag = 0;
-    if (GetTickCount() - s_lastCallDiag > 3000) {
+    DWORD now = GetTickCount();
+    DWORD logInterval = s_relativeOnlyCombatMode.load() ? 10000 : 3000;
+    if (now - s_lastCallDiag > logInterval) {
         Logf("讀取", "📍 ReadPlayerStateDetailed called: gh=%p hProcess=%p baseAddr=0x%08X",
             (void*)gh, gh ? (void*)gh->hProcess : NULL, gh ? gh->baseAddr : 0);
-        s_lastCallDiag = GetTickCount();
+        s_lastCallDiag = now;
     }
     return ReadPlayerStateDetailedInternal(gh, out, reason, reasonSize, true);
 }
@@ -2648,7 +2670,7 @@ void BotTick(GameHandle* gh) {
     static bool s_platformLogged = false;
     if (!s_platformLogged) {
         InitPlatformDetect();
-        Logf("系統", "=== 平台檢測: %s === (輸入模式: SendInput 前景輸入)",
+        Logf("系統", "=== 平台檢測: %s === (輸入模式: Game.exe 視窗內輸入 / YOLO 優先)",
             IsWin7Platform() ? "Windows 7" : "Windows 10/11");
         s_platformLogged = true;
     }
@@ -2819,15 +2841,16 @@ void BotTick(GameHandle* gh) {
         BotState currentState = GetBotState();
 
         // ── 讀取視覺玩家狀態 ──
-        VisualPlayerState vs;
-        static VisualPlayerState s_lastVs;
+        VisualPlayerState vs = {};
+        static VisualPlayerState s_lastVs = {};
         if (ReadVisualPlayerState(gh->hWnd, &vs) && vs.found) {
             s_lastVs = vs;
         } else {
-            // 視覺讀取失敗，降級回記憶體模式
+            // 血條讀取失敗時保留上一筆視覺狀態；怪物掃描仍優先走 YOLO。
+            vs = s_lastVs;
             static DWORD s_visualFailLog = 0;
             if (nowVisual - s_visualFailLog > 3000) {
-                Log("視覺", "⚠️ 視覺讀取失敗，降級回記憶體模式");
+                Log("視覺", "⚠️ 血條讀取失敗，本幀沿用上一筆；怪物掃描仍優先 YOLO");
                 s_visualFailLog = nowVisual;
             }
         }
@@ -2877,14 +2900,15 @@ void BotTick(GameHandle* gh) {
                             s_combatIntent = CombatIntent::SEEKING;
                         }
                     } else {
-                        // 攻擊技能
+                        // 攻擊技能 - 使用 F1~F9 功能鍵
                         static int s_visualSkillIndex = 0;
                         int skillCount = g_cfg.attackSkillCount.load();
                         if (skillCount < 1) skillCount = 1;
                         int skillIdx = s_visualSkillIndex % skillCount;
-                        BYTE skillKey = (BYTE)(VK_F1 + skillIdx);
+                        BYTE skillKey = VK_F1 + skillIdx;
+                        if (skillKey > VK_F9) skillKey = VK_F9;
                         SendKeyDirect(gh->hWnd, skillKey);
-                        SleepJitter(20);
+                        Logf("技能", "按鍵: F%d (skillIdx=%d)", skillIdx + 1, skillIdx);
                         // 攻擊定點
                         static int s_visualPointIndex = 0;
                         ClickAttackPoint(gh->hWnd, s_visualPointIndex % Coords::ATTACK_SCAN_COUNT);
