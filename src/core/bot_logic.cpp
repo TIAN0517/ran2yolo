@@ -22,6 +22,7 @@
 #include "../platform/coord_calib.h"
 #include "../input/target_lock.h"
 #include "../vision/visionentity.h"
+#include "../vision/screenshot_assist_compat.h"
 #include "../vision/dm_visual_supply.h"
 #include "../vision/dm_visual.h"
 #include "pattern_scanner.h"

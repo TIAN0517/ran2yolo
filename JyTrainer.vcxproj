@@ -149,6 +149,7 @@
     <ClCompile Include="src\vision\dm_visual.cpp" />
     <ClCompile Include="src\vision\dm_visual_supply.cpp" />
     <ClCompile Include="src\vision\visionentity.cpp" />
+    <ClCompile Include="src\vision\screenshot_assist_compat.cpp" />
     <ClCompile Include="src\vision\screenshot_universal.cpp" />
     <ClCompile Include="src\vision\vlm_vision_api.cpp" />
     <ClCompile Include="src\vision\vision_api_rotator.cpp" />

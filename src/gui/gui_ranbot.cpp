@@ -464,8 +464,6 @@ static void PageDashboard() {
 
     // 戰鬥意向狀態（乾淨版本）
     ImGui::BeginGroup();
-    extern IntentMode GetIntentMode();
-    extern int GetCombatIntentState();
     IntentMode mode = GetIntentMode();
     int intentState = GetCombatIntentState();
 
