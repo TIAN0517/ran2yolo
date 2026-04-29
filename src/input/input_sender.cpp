@@ -601,7 +601,24 @@ static void SendKeyboardTap(HWND hWnd, BYTE vk) {
 }
 
 void SendKeyFast(BYTE vk) {
-    SendKeyboardInput(vk, KEYEVENTF_SCANCODE);
+    if (!vk) return;
+
+    // 使用 PostMessage 而非 SendInput（避免黑屏，背景模式也能工作）
+    HWND hWnd = GetForegroundWindow();
+    if (!hWnd) {
+        // 嘗試找遊戲視窗
+        hWnd = FindWindowW(NULL, L"亂2 online");
+        if (!hWnd) hWnd = FindWindowW(NULL, L"Game");
+    }
+    if (!hWnd) return;
+
+    UINT scan = MapVirtualKeyA(vk, MAPVK_VK_TO_VSC);
+    LPARAM downLP = (scan << 16) | (1 << 30) | (1 << 31);
+    LPARAM upLP = (scan << 16) | (1 << 30) | (1 << 31) | (1 << 29);
+
+    PostMessageA(hWnd, WM_KEYDOWN, vk, downLP);
+    Sleep(10);
+    PostMessageA(hWnd, WM_KEYUP, vk, upLP);
 }
 
 // ============================================================
