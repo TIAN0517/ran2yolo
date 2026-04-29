@@ -5,10 +5,9 @@
 #include <windows.h>
 #include <vector>
 #include <atomic>
-#include "../game/game_process.h"
 
 // ============================================================
-// Bot 狀態機（完整 FSM + Utility States）
+// Bot 狀態機（完整 FSM）
 // ============================================================
 enum class BotState {
     IDLE           = 0,  // 閒置
@@ -19,16 +18,10 @@ enum class BotState {
     TOWN_SUPPLY    = 5,  // 城鎮補給（總協調，內部使用 s_supplyPhase 0-4）
     // （已刪除 SUPPLY_NPC_WALK~SUPPLY_CLOSE — 死代碼，實際使用 int s_supplyPhase）
     BACK_TO_FIELD  = 20, // 返回野外（按下前點卡）
-    PAUSED        = 40, // 轉轉樂安全碼已暫停
-
-    // === 新增：逃生/容錯狀態 ===
-    RANDOM_EVADE   = 50, // 隨機反向走位（Watchdog 觸發，用於脫離卡點）
-    EMERGENCY_STOP = 99, // 緊急停機（VLM 看門狗觸發，系統無法辨識畫面）
-    RECOVERY       = 100, // VLM 驅動的脫困狀態（狀態機卡死時進入）
-
-    // === 內部標誌（用於 Utility AI 評分）===
-    FLAG_WANDER_RADIUS = 0x100, // 漫遊半徑模式
-    FLAG_DM_STUCK      = 0x200, // DM 模式卡死標誌
+    PAUSED         = 40, // 轉轉樂安全碼已暫停
+    RECOVERY       = 41, // 記憶體失效恢復中
+    RANDOM_EVADE   = 42, // 隨機躲避（防卡位）
+    EMERGENCY_STOP = 99, // 緊急停止
 };
 
 // ============================================================
@@ -103,37 +96,6 @@ struct Waypoint {
 };
 
 // ============================================================
-// Log/Logf 前向宣告（供其他模組使用）
-// ============================================================
-extern void Log(const char* tag, const char* msg);
-extern void Logf(const char* tag, const char* fmt, ...);
-
-// ============================================================
-// 意圖模式枚舉（F1/F2 切換）
-// ============================================================
-enum class IntentMode {
-    COMBAT = 0,   // 攻擊模式
-    SUPPORT = 1,   // 輔助模式
-};
-
-// ============================================================
-// 意圖模式控制函式
-// ============================================================
-extern IntentMode GetIntentMode();
-extern void SetIntentMode(IntentMode mode);
-extern void CycleCombatIntent();    // F1: 輪替戰鬥意向
-extern void CycleSupportSkill(int delta);  // F2: 選擇輔助技能
-extern void CycleCombatSkill(int delta);   // 數字鍵: 選擇攻擊技能
-extern const char* GetIntentModeName(IntentMode mode);
-
-// ============================================================
-// Bot functions used by FSM and other modules
-// ============================================================
-bool IsTownMap(int mapId);
-void ResetCombatRuntimeState();
-int GetCachedInvCount();
-
-// ============================================================
 // Bot 設定（完整版）
 // ============================================================
 struct BotConfig {
@@ -164,7 +126,7 @@ struct BotConfig {
     BotConfig& operator=(BotConfig&&) = delete;
 
     std::atomic<bool>  active{false};
-    std::atomic<bool>  shutdownRequested_{false};  // 防止 CriticalSection 双重删除
+    std::atomic<bool>  shutdownRequested_{false};  // BUG-016: 防止 CriticalSection 双重删除
 
     // ── 自動喝水 ──
     std::atomic<int>   hp_potion_pct{80};
@@ -177,29 +139,19 @@ struct BotConfig {
     std::atomic<int>   inventory_full_pct{90}; // 背包滿於 %
 
     // ── 藥水不足回城 ──
-    std::atomic<bool>  potion_check_enable{false};  // 預設關閉
+    std::atomic<bool>  potion_check_enable{true};  // 啟用藥水不足檢測
     std::atomic<int>   potion_slot_start{12};      // 藥水格起始 (第3列=slot 12)
     std::atomic<int>   potion_slot_end{29};        // 藥水格結束 (第5列=slot 29)
     std::atomic<int>   min_potion_slots{6};        // 最低藥水泥格數 (低於此值回城)
     std::vector<int>   townMapIds;             // 城鎮地圖 ID 清單（安全區）
     std::atomic<int>  teleport_delay_ms{3000}; // 傳送後等待時間（確保載入完成）
 
-    // ── 盲目賣物（不依賴記憶體讀取）──
-    std::atomic<bool>  blind_sell_enable{true};  // 啟用盲目賣物模式
-    std::atomic<int>   blind_sell_start{18};     // 從第幾格開始賣（跳過保護列0-17）
-    std::atomic<int>   blind_sell_count{60};     // 最多賣幾格（78格總共）
-    std::atomic<int>   blind_sell_delay{100};    // 每格間隔(ms)
-
     // ── 戰鬥 ──
-    std::atomic<int>   attack_interval_ms{20};   // 攻擊點輪轉間隔（預設20ms）
+    std::atomic<int>   attack_interval_ms{400};
     std::atomic<int>   attack_range{8};
     std::atomic<int>   pickup_range{3};
     std::atomic<bool>  auto_pickup{true};
     std::atomic<int>   pickup_interval_ms{1000};
-    std::atomic<int>   attackSkillInterval{1000}; // F1 攻擊技能輪替冷卻（ms）
-
-    // ── 技能設定 ──
-    std::atomic<int>   mainSkillCount{5};       // F1 攻擊技能數量（1~5）
 
     // ── 自動復活 ──
     std::atomic<bool>  auto_revive{true};
@@ -245,10 +197,6 @@ struct BotConfig {
     std::atomic<bool>  anti_stuck_enable{true};  // 啟用防呆自動移動
     std::atomic<int>   anti_stuck_interval_sec{10}; // 移動間隔（秒）
     std::atomic<int>   anti_stuck_offset{15};    // 偏移距離（格）
-
-    // ── 反玩家攻擊（秒飛）──
-    std::atomic<bool>  anti_pk_enable{true};    // 啟用反PK
-    std::atomic<int>   anti_pk_cooldown_sec{300}; // 逃生後冷卻時間（秒，預設5分鐘）
     std::atomic<int>   anti_stuck_move_ms{500};  // 移動持續時間（毫秒）
 
     // ── 敵人接近偵測 ──
@@ -256,6 +204,10 @@ struct BotConfig {
     std::atomic<float> enemy_approach_speed{50.0f}; // 速度閾值（distance/sec）
     std::atomic<float> enemy_approach_dist{30.0f};   // 偵測距離上限（格）
     std::atomic<int>   enemy_approach_trigger{0};     // 0=回城, 1=暫停
+
+    // ── 反PK（防玩家攻擊）──
+    std::atomic<bool>  anti_pk_enable{true};          // 啟用反PK
+    std::atomic<int>   anti_pk_cooldown_sec{300};     // 逃生後冷卻時間（秒）
 
     // ═══════════════ 固定掃打座標 ════════════════
     // 使用 coords.h 的 AttackScanPoints 固定 8 點輪轉
@@ -269,10 +221,7 @@ struct BotConfig {
     // 視覺模式：以視覺辨識為主，取代記憶體讀取
     std::atomic<bool>  use_visual_mode{false}; // 開啟視覺模式（主力）
     std::atomic<int>   visual_scan_timeout_ms{100}; // 視覺掃描超時（毫秒）
-
-    // ═══════════════ 大漠插件 DM 模式 ════════════════
-    // 獨立 DM 模式，與 use_visual_mode 互斥
-    std::atomic<bool>  use_dm_mode{false}; // 啟用大漠插件戰鬥模式
+    // ═════════════════════════════════════════
 
     // ── 熱鍵 ──
     std::atomic<BYTE>  key_hp_potion{'Q'};       // HP 藥水
@@ -287,44 +236,37 @@ struct BotConfig {
     std::atomic<BYTE>  key_mount{0x75};          // F6（預留：乘騎功能）
     std::atomic<BYTE>  key_waypoint_start{'S'};  // 起點卡（回城）
     std::atomic<BYTE>  key_waypoint_end{'D'};    // 前點卡（返回野外）
-    // NPC對話用左鍵點，這個鍵位不再使用
+    std::atomic<BYTE>  key_npc_talk{VK_SPACE};   // 空格
     std::atomic<BYTE>  key_walk_forward{VK_UP};  // 方向鍵上
     std::atomic<BYTE>  key_walk_back{VK_DOWN};   // 方向鍵下
     std::atomic<BYTE>  key_walk_left{VK_LEFT};   // 方向鍵左
     std::atomic<BYTE>  key_walk_right{VK_RIGHT}; // 方向鍵右
-    // 上下馬功能不使用
+    std::atomic<BYTE>  key_mount_updown{VK_SPACE};
 
-    // ═══════════════ 技能系統（F1 單欄）═══════════════
-    // 攻擊技能：F1 欄 1~5 輪替
-    // 輔助技能：F1 欄 6~0 依冷卻施放
+    // ═══════════════ 技能系統（F1攻擊欄 / F2輔助欄）═══════════════
+    // F1/F2 只是欄位切換鍵，按一次即可，不需每次施放都按
+    // 攻擊技能：F1 切到攻擊欄 → 數字鍵 1~0 施放
+    // 輔助技能：定時 F2 切到輔助欄 → 數字鍵施放 → F1 切回
 
-    // ── 攻擊技能（F1 1~5）──
+    // ── 攻擊技能（F1 欄位）──
     static constexpr int MAX_SKILLS = 10;
-    std::atomic<int> attackSkillCount{5};          // 使用幾個攻擊技能（1~5）
+    std::atomic<int> attackSkillCount{10};         // 使用幾個攻擊技能（1~10）
+    std::atomic<int> attackSkillInterval{50};     // 攻擊技能間隔 (ms)
     std::atomic<int> rightClickDelayMs{200};       // 右鍵點擊延遲 (ms)
     std::atomic<BYTE> attackBarKey{VK_F1};         // 攻擊欄切換鍵
 
-    // ── 輔助技能（F1 6~0）──
+    // ── 輔助技能（F2 欄位）──
     static constexpr int MAX_AUX_SKILLS = 5;
     std::atomic<bool> buffEnabled{true};           // 是否啟用輔助技能
-    std::atomic<int>  buffSkillCount{5};           // 使用幾個輔助技能（6~0）
-    std::atomic<int>  buffSkillInterval{2500};     // 保留相容：每個技能間隔（毫秒）
-    std::atomic<int>  buffWaveInterval{60000};     // 保留相容：輔助冷卻（毫秒）
-    std::atomic<int>  buffCastInterval{60};        // 輔助冷卻（秒）
-    std::atomic<BYTE> buffBarKey{VK_F1};           // 保留相容：同 F1
+    std::atomic<int>  buffSkillCount{2};           // 使用幾個輔助技能（1~5）
+    std::atomic<int>  buffCastInterval{30};        // 輔助施放間隔（秒）
+    std::atomic<BYTE> buffBarKey{VK_F2};           // 輔助欄切換鍵
 
     // ── 輪替狀態（thread-safe）──
     std::atomic<int> currentSkillIndex{0};         // 目前輪到哪個攻擊技能
     std::atomic<DWORD> lastRightClickTime{0};      // 上次右鍵攻擊時間
     std::atomic<DWORD> lastSkillTime{0};           // 上次技能施放時間
     std::atomic<DWORD> lastBuffTime{0};            // 上次輔助技能施放時間
-    // ════════════════════════════════════════════════
-
-    // ── 意圖模式（F1/F2 切換）──
-    std::atomic<IntentMode> intentMode{IntentMode::COMBAT};  // 當前意圖模式
-    std::atomic<int> intentCycleIntervalMs{700};             // 戰鬥意向輪替間隔 (ms)
-    std::atomic<int> selectedCombatSkill{0};                 // 當前選擇的攻擊技能 (0-9)
-    std::atomic<int> selectedSupportSkill{0};                // 當前選擇的輔助技能 (0-9)
     // ════════════════════════════════════════════════
 
     // ── 保護物品（不賣）──
@@ -350,6 +292,15 @@ struct BotConfig {
     std::vector<Waypoint> huntWaypoints;
 };
 
+// ── 戰鬥意向枚舉 ──
+enum class IntentMode {
+    ATTACK_NORMAL = 0,
+    KITING = 1,
+    AOE_CLEAR = 2,
+    ELITE_ONLY = 3,
+    DEFENSIVE = 4
+};
+
 // ============================================================
 // Bot 邏輯函式
 // ============================================================
@@ -357,6 +308,23 @@ struct BotConfig {
 // 初始化
 extern void InitBotLogic();
 extern void ShutdownBotLogic();  // M-B1: 清理 critical section
+
+// 日誌函數（bot_logic.cpp 內部實現，供其他模組使用）
+extern void Log(const char* tag, const char* msg);
+extern void Logf(const char* tag, const char* fmt, ...);
+
+// 戰鬥意向
+extern IntentMode GetIntentMode();
+extern int GetCombatIntentState();
+
+// 請求恢復（供 recovery_vision.cpp 使用）
+extern void RequestRecovery(const char* reason);
+
+// 復活執行（供 state_handler.cpp 使用）
+extern bool ExecuteRevive(HWND hWnd);
+
+// 城鎮判斷
+extern bool IsTownMap(int mapId);
 
 // 讀取玩家狀態（RPM）
 extern bool ReadPlayerState(struct GameHandle* gh, PlayerState* out);
@@ -400,7 +368,6 @@ extern void StopBot();
 extern void ForceStopBot();
 extern void ToggleBotActive();  // 切換開始/暫停
 extern void ResetBotTarget();
-extern void RequestRecovery(const char* reason);  // 請求進入 Recovery 狀態（取代直接 StopBot）
 
 // ── GUI Pipe 命令用 ──
 extern int GetMonsterCount(struct GameHandle* gh);
@@ -423,18 +390,8 @@ extern void SupplyTick(struct GameHandle* gh);
 
 // ✅ 玩家狀態快取（BotThread→UIThread，thread-safe）
 extern struct PlayerState GetCachedPlayerState();
-extern struct PlayerState GetCachedPlayerStateRaw();
 extern bool HasCachedPlayerStateData();
 extern bool IsRelativeOnlyCombatMode();
-
-// ✅ 執行緒安全渲染鎖（UI 渲染前鎖定，讀取完成後解鎖）
-// 用法：
-//   LockRenderData();
-//   PlayerState st = GetCachedPlayerState();
-//   // ... 渲染 UI ...
-//   UnlockRenderData();
-extern void LockRenderData();
-extern void UnlockRenderData();
 
 // ✅ UI 日誌鉤子（可變參，支援格式化）
 extern void UIAddLog(const char* fmt, ...);
@@ -489,12 +446,6 @@ extern int GetCombatIntentState();
 // ✅ 獲取擊殺計數
 extern DWORD GetKillCount();
 
-// ✅ Pattern Scan（當 baseAddr 為 0 或偏移失效時觸發）
-extern bool TriggerPatternScanIfNeeded(struct GameHandle* gh);
-
-// ✅ 復活執行（供 FSM DeadHandler 呼叫）
-extern bool ExecuteRevive(HWND hWnd);
-
 // ✅ 獲取角色名稱
 extern void GetPlayerName(char* outName, int maxLen);
 
@@ -503,45 +454,5 @@ extern std::atomic<bool> g_licenseValid;
 extern bool IsLicenseValid();
 extern void SetLicenseValid(bool valid);
 
-// ============================================================
-// Recovery 系統（VLM 驅動的狀態機脫困）
-// ============================================================
-
-// Recovery 區塊診斷結果
-enum class VLMBlockingIssue {
-    Unknown = 0,
-    Popup,
-    Terrain,
-    Dead,
-    InventoryFull,
-    NpcDialog,
-    ShopDialog,
-    Loading
-};
-
-// Recovery 建議動作
-enum class VLMSuggestedAction {
-    NoAction = 0,
-    PressESCx3MoveRandom,
-    ReturnToTown,
-    WaitForLoading,
-    AcceptDialog,
-    CloseShop,
-    Resurrect,
-    ClearInventory
-};
-
-// 初始化 Recovery 系統（BotTick 啟動前呼叫一次）
-extern void InitRecoverySystem();
-
-// Recovery Tick（由 BotTick 內部呼叫，state==RECOVERY 時執行）
-extern void RecoveryTick(struct GameHandle* gh);
-
-// 檢查是否在 Recovery 狀態
-extern bool IsInRecoveryState();
-
-// 獲取 Recovery 嘗試次數
-extern int GetRecoveryAttempts();
-
-// 重置 Recovery 嘗試計數
-extern void ResetRecoveryAttempts();
+// ✅ PAUSED 恢復時用的前一個狀態（用於正確恢復）
+extern BotState s_pausedPreviousState;

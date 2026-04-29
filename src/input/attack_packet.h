@@ -119,6 +119,7 @@ struct RAN2AreaSkillPacket {
 // ============================================================
 extern bool InitAttackSender(const char* serverIp, int serverPort);
 extern void ShutdownAttackSender();
+extern bool TryAttackSenderConnect(int timeoutMs);
 
 // ============================================================
 // Session ID / Player ID 管理

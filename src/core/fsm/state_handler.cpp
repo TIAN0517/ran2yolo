@@ -290,16 +290,18 @@ struct HuntingHandler : public IStateHandler {
                 return (int)BotState::IDLE;  // 返回IDLE等待
             }
 
-            // 5分鐘冷卻後：按D前點回練功點
+            // 5分鐘冷卻中：保持在HUNTING狀態，不返回IDLE
+            // 這是關鍵修復：避免 HUNTING→IDLE→HUNTING 每個Tick震盪
             if (s_evadeUsed) {
                 DWORD cooldownMs = (DWORD)(g_cfg.anti_pk_cooldown_sec.load() * 1000);
                 if (now - s_evadeUseTime > cooldownMs) {
                     Log("反PK", "[冷卻結束] 按D回練功點");
                     SendKeyDirect(gh->hWnd, 'D');
                     s_evadeUsed = false;
-                    return (int)BotState::HUNTING;
+                    return (int)BotState::HUNTING;  // 冷卻結束，返回HUNTING
                 }
-                return (int)BotState::IDLE;  // 冷卻中，保持IDLE
+                // 冷卻中：保持在HUNTING，不返回IDLE（避免震盪）
+                return -1;
             }
         }
 

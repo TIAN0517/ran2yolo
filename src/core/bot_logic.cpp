@@ -9,25 +9,19 @@
 #include <atomic>
 
 #include "bot_logic.h"
-#include "fsm/state_handler.h"
-#include "fsm/bot_tick_simplified.h"
-#include "../game/game_process.h"
-#include "../input/input_sender.h"
-#include "../game/memory_reader.h"
-#include "../config/offset_config.h"
-#include "../config/coords.h"
-#include "../game/nethook_shmem.h"
-#include "../input/attack_packet.h"
-#include "../license/offline_license.h"
-#include "../platform/coord_calib.h"
-#include "../input/target_lock.h"
-#include "../vision/visionentity.h"
-#include "../vision/screenshot_assist_compat.h"
-#include "../vision/dm_visual_supply.h"
-#include "../vision/dm_visual.h"
-#include "pattern_scanner.h"
-#include "recovery_vision.h"
-#include "../embed/dm_plugin.h"
+#include "game_process.h"
+#include "input_sender.h"
+#include "memory_reader.h"
+#include "../vision/screenshot_assist.h"
+#include "offset_config.h"
+#include "coords.h"
+#include "nethook_shmem.h"
+#include "attack_packet.h"
+#include "offline_license.h"
+#include "screenshot.h"
+#include "coord_calib.h"
+#include "target_lock.h"
+#include "visionentity.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdarg>
@@ -39,16 +33,6 @@
 #ifndef __readfsdword
 #define __readfsdword(x) 0
 #endif
-#ifndef __readgsqword
-#define __readgsqword(x) 0
-#endif
-#endif
-
-// x64 uses GS segment, x86 uses FS segment
-#ifdef _WIN64
-#define READ_PEB_ADDR() ((void*)(__readgsqword(0x30)))
-#else
-#define READ_PEB_ADDR() ((void*)(__readfsdword(0x30)))
 #endif
 
 // ============================================================
@@ -80,13 +64,8 @@ static void SleepJitter(int ms) {
 
 // 前向宣告（Log/Logf 在後面定義）
 void Log(const char* tag, const char* msg);
-static Coords::Point ResolveReviveClickPoint(CalibIndex idx, int fx, int fz);
-static bool ClickRelativeWithSendInput(HWND hWnd, int rx, int rz, const char* reason);
-
-// External function declarations (from fsm_integration.cpp)
-extern void InitFSM();
-extern void ShutdownFSM();
-
+void Logf(const char* tag, const char* fmt, ...);
+static void SupplyForceReset(void);
 // ============================================================
 // Global state
 // ============================================================
@@ -95,42 +74,25 @@ BotConfig g_cfg;
 static std::atomic<int> g_State{(int)BotState::IDLE};
 static PlayerState s_uiPlayerCache;
 static CRITICAL_SECTION s_uiCacheCs;
-static CRITICAL_SECTION s_stateTransitionCs;  // 狀態轉換需要鎖保護
-
-// ✅ 執行緒安全：UI 渲染鎖（保護 PlayerState 快取）
-// 在 BotThread 寫入、UIThread 讀取時需要持有此鎖
-static CRITICAL_SECTION s_renderCs;
-static volatile LONG s_renderCsInit = 0;
-
-// Win7兼容的渲染鎖初始化
-static void EnsureRenderCsReady() {
-    if (InterlockedCompareExchange(&s_renderCsInit, 1, 0) == 0) {
-        InitializeCriticalSection(&s_renderCs);
-    }
-}
+static CRITICAL_SECTION s_stateTransitionCs;  // BUG-C002: 狀態轉換需要鎖保護
 
 // ✅ 離線卡密驗證狀態
 std::atomic<bool> g_licenseValid{false};
 bool IsLicenseValid() { return g_licenseValid.load(); }
 void SetLicenseValid(bool valid) { g_licenseValid.store(valid); }
-
 static volatile LONG s_uiCacheCsInit = 0;
 static volatile LONG s_invCacheCsInited = 0;
-
-// 戰鬥意向枚舉（必須在 atomic 之前定義）
-enum class CombatIntent {
-    SEEKING = 0,   // 尋找目標中
-    ENGAGING = 1,  // 已在攻擊範圍，施放技能中
-    LOOTING  = 2,  // 目標死亡，等待撿物品
-};
-
-// 多執行緒安全：atomic 保護的關鍵狀態
-static std::atomic<DWORD> s_currentTargetId{0};    // 當前鎖定目標 ID
-static std::atomic<DWORD> s_killCount{0};          // 擊殺計數器
-static std::atomic<int>   s_combatIntent{(int)CombatIntent::SEEKING};  // 戰鬥意向狀態
-
+static DWORD s_currentTargetId = 0;
+static DWORD s_lastPickupTime = 0;
+static DWORD s_lastDrinkCheck = 0;
+static char  s_curBar = (char)0xFF;  // 目前技能列（0xFF=未初始化，確保第一次 SwitchBar 一定發送）
+static DWORD s_lastStatusLog = 0;
+static DWORD s_returnStartTime = 0;
+static bool s_returnCardSent = false;
+static DWORD s_backToFieldStartTime = 0;
 static DWORD s_deathStartTime = 0;  // 死亡時間
 static DWORD s_deadRecoverySeenTime = 0;  // 偵測到 HP 恢復的穩定起點
+static DWORD s_partialDeadSeenTime = 0;
 // 復活狀態變量
 static std::atomic<bool> s_reviveClicked{false};
 static int s_reviveRetryCount = 0;
@@ -139,59 +101,120 @@ static bool s_enteredHunting = false;
 static bool s_wasInHunting = false;
 static bool s_enteredDeadState = false;
 static bool s_loggedDead = false;
+static bool s_loggedReturn = false;
 static BotState s_pausedPreviousState = BotState::IDLE;  // PAUSED 之前的狀態（用於正確恢復）
 static DWORD s_lastReadFailLog = 0;
-
-static const int REVIVE_MAX_ATTEMPTS = 20;
-static const int REVIVE_SOUL_PEARL_ATTEMPTS = 4;
+static DWORD s_lastNoHwndLog = 0;
 static DWORD s_consecutiveReadFail = 0;
 static DWORD s_lastInvalidStateLog = 0;
 static DWORD s_lastInventoryDiagLog = 0;
+static DWORD s_lastLegacyOffsetLog = 0;
+static DWORD s_lastRelativeCombatLog = 0;
 static DWORD s_lastValidPlayerStateTime = 0;
-static DWORD s_lastPatternScanTime = 0;
-static bool s_patternScanFailed = false;
 static bool s_hasLastValidPlayerState = false;
 static PlayerState s_lastValidPlayerState = {};
 static std::atomic<bool> s_relativeOnlyCombatMode{false};
-// 意向切換防抖：避免高頻率熱鍵切換
+static int s_relativeScanIndex = 0;
+static int s_relativeSkillIndex = 0;
+static int s_returnSourceMapId = -1;
+static float s_returnSourceX = 0.0f;
+static float s_returnSourceZ = 0.0f;
+static bool s_returnSourceValid = false;
+static int s_backToFieldSourceMapId = -1;
+static float s_backToFieldSourceX = 0.0f;
+static float s_backToFieldSourceZ = 0.0f;
+static bool s_backToFieldSourceValid = false;
+static bool s_backToFieldSourceWasTown = false;
+// ═══════════════ 戰鬥意向狀態機 ═══════════════
+enum class CombatIntent {
+    SEEKING = 0,   // 尋找目標中
+    ENGAGING = 1,  // 已在攻擊範圍，施放技能中
+    LOOTING  = 2,  // 目標死亡，等待撿物品
+};
+static CombatIntent s_combatIntent = CombatIntent::SEEKING;
+static DWORD s_killCount = 0;             // 擊殺計數器
+static DWORD s_targetLostTime = 0;        // 目標丟失/死亡時間
+static DWORD s_lootDelay = 800;           // 死後撿物品延遲(ms)
+static DWORD s_engageStartTime = 0;       // 開始攻擊的時間
+static DWORD s_targetLockTime = 0;        // 目標鎖定時間
+static DWORD s_lastTargetHp = 0;          // 上次記錄的目標 HP
+static DWORD s_hpCheckTime = 0;           // 上次 HP 檢查時間
+// 失敗目標追蹤：記住打不到的怪，避免重複鎖定
+static const int MAX_FAILED_TARGETS = 10;
+struct FailedTarget { DWORD id; DWORD failTime; };
+static FailedTarget s_failedTargets[MAX_FAILED_TARGETS] = {};
+static int s_failedCount = 0;
+static DWORD s_lastFailedPurge = 0;        // 上次清理失敗列表的時間
+// 超時設定
+static const DWORD ENGAGE_HP_TIMEOUT = 12000;   // 12 秒 HP 沒下降 → 放棄
+static const DWORD ENGAGE_HARD_TIMEOUT = 30000;  // 30 秒硬超時 → 強制放棄
+static const DWORD FAILED_TARGET_COOLDOWN = 60000; // 60 秒內不再鎖定失敗目標
+static bool IsFailedTarget(DWORD targetId);
+// 每個技能的獨立冷卻時間（毫秒）
+static DWORD s_skillLastTime[BotConfig::MAX_SKILLS] = {0};
+// 防止同一 tick 內多次施放
+static DWORD s_lastCombatTick = 0;
+// 當前技能索引
+static int s_currentSkillIndex = 0;
+// 意向切換防抖：避免狀態機在高頻率下當掉（100ms 間隔）
 static DWORD s_lastIntentChange = 0;
+// 鎖定目標冷卻：防止高頻率點擊
+static DWORD s_lastTargetClick = 0;
+// ═══════════════ 攻擊圓圈範圍（1024x768 相對座標中心 + 真圓半徑）═══════════════
+static const int ATTACK_CENTER_X = IsWin7Platform() ? 520 : 500;
+static const int ATTACK_CENTER_Y = IsWin7Platform() ? 390 : 370;
+static const int ATTACK_TARGET_RADIUS = 260;
+static DWORD s_playerServerId = 0;
+static DWORD s_playerServerIdTime = 0;
+static bool SplitServerId(DWORD serverId, DWORD* outMid, DWORD* outSid) {
+    if (outMid) *outMid = (serverId >> 8) & 0x3FF;
+    if (outSid) *outSid = serverId & 0x3F;
+    return serverId != 0 && serverId != 0xFFFFFFFF;
+}
 // ============================================================
-// CAPTCHA 安全碼防檢測
+// 轉轉樂安全碼防檢測
 // ============================================================
-static bool CheckCaptchaWindow()
+struct SecurityWindowSearchCtx {
+    bool found;
+};
+static BOOL CALLBACK EnumSecurityWindowProc(HWND hwnd, LPARAM lParam) {
+    SecurityWindowSearchCtx* ctx = (SecurityWindowSearchCtx*)lParam;
+    if (!IsWindowVisible(hwnd)) return TRUE;
+    wchar_t title[256] = {0};
+    int len = GetWindowTextW(hwnd, title, 256);
+    if (len <= 0) return TRUE;
+    if (wcsstr(title, L"轉轉樂") || wcsstr(title, L"抽獎")) {
+        ctx->found = true;
+        return FALSE;
+    }
+    return TRUE;
+}
+static bool CheckSecurityCodeWindow()
 {
     static bool s_alreadyNotified = false;
-
-    // Fast window check
-    HWND hCaptcha1 = FindWindowW(NULL, L"轉轉樂安全碼");
-    HWND hCaptcha2 = FindWindowW(NULL, L"抽獎轉轉樂");
-
-    bool detected = (hCaptcha1 && IsWindowVisible(hCaptcha1)) ||
-                    (hCaptcha2 && IsWindowVisible(hCaptcha2));
-
-    // Also check for "RANRI" in window titles
-    if (!detected) {
-        wchar_t title[256] = {0};
-        HWND hWnd = GetForegroundWindow();
-        if (hWnd && GetWindowTextW(hWnd, title, 256) > 0) {
-            if (wcsstr(title, L"RANRI")) {
-                detected = true;
-            }
-        }
+    bool detected = false;
+    HWND h1 = FindWindowW(NULL, L"抽獎轉轉樂");
+    HWND h2 = FindWindowW(NULL, L"轉轉樂安全碼");
+    if ((h1 && IsWindowVisible(h1)) || (h2 && IsWindowVisible(h2))) {
+        detected = true;
     }
-
+    if (!detected) {
+        SecurityWindowSearchCtx ctx = { false };
+        EnumWindows(EnumSecurityWindowProc, (LPARAM)&ctx);
+        if (ctx.found) detected = true;
+    }
     if (detected) {
         BotState oldState = (BotState)g_State.load();
         if (oldState != BotState::PAUSED) {
             SetBotState(BotState::PAUSED);
-            Log("防偵測", "★★★ 偵測到 CAPTCHA 安全碼視窗！已強制暫停機器人 ★★★");
+            Log("防偵測", "★★★ 偵測到轉轉樂安全碼視窗！已強制暫停機器人 ★★★");
             Log("防偵測", "  └- 請手動輸入安全碼");
             Log("防偵測", "  └- 輸入完後按 F11 繼續 bot");
         }
         if (!s_alreadyNotified) {
             s_alreadyNotified = true;
             MessageBoxW(NULL,
-                L"偵測到 CAPTCHA 安全碼視窗！\n\n"
+                L"偵測到轉轉樂安全碼視窗！\n\n"
                 L"機器人已自動暫停。\n"
                 L"請手動輸入安全碼後，按 F11 恢復運行。",
                 L"JyTrainer - 安全碼警告",
@@ -202,26 +225,32 @@ static bool CheckCaptchaWindow()
     s_alreadyNotified = false;
     return false;
 }
-
-// Handle CAPTCHA state - pause bot until window closes
-static void HandleCaptchaState()
-{
-    // Bot is already paused by CheckCaptchaWindow()
-    // Just wait for window to close
-    HWND hCaptcha1 = FindWindowW(NULL, L"轉轉樂安全碼");
-    HWND hCaptcha2 = FindWindowW(NULL, L"抽獎轉轉樂");
-
-    while ((hCaptcha1 && IsWindowVisible(hCaptcha1)) ||
-           (hCaptcha2 && IsWindowVisible(hCaptcha2))) {
-        Sleep(500);
-        hCaptcha1 = FindWindowW(NULL, L"轉轉樂安全碼");
-        hCaptcha2 = FindWindowW(NULL, L"抽獎轉轉樂");
-    }
-
-    Log("防偵測", "✅ CAPTCHA 安全碼視窗已關閉");
-}
-static int s_huntPointIndex = 0;
+// ============================================================
+// 防呆自動移動功能
+// ============================================================
+static DWORD s_antiStuckLastMove = 0;
+static int   s_antiStuckPhase = 0;
+static DWORD s_antiStuckPhaseStart = 0;
+// ============================================================
+// SupplyTick / BACK_TO_FIELD 統一狀態機靜態變數
+// ============================================================
+static int s_supplyPhase = 0;
+static DWORD s_supplyPhaseStart = 0;
+static int s_supplyRetryCount = 0;
+static DWORD s_npcId = 0;
 static DWORD s_invBase = 0;
+static int s_huntPointIndex = 0;
+static int s_phase0SubStep = 0;
+static DWORD s_phase0RClickTime = 0;
+static int s_buySubPhase = 0;
+static bool s_supplyEntered = false;
+static DWORD s_globalTimeout = 0;
+static int s_lastSupplyPhase = -1;
+static DWORD s_buyPhaseStart = 0;
+static bool s_reentryGuard = false;
+static bool s_sellSessionActive = false;
+static DWORD s_lastSellAction = 0;
+static DWORD s_backToFieldCardSent = 0;  // 時間戳，當發送時設置，用於檢測
 
 enum class PlayerStateReadStatus {
     OK = 0,
@@ -263,7 +292,7 @@ static void EnsureUICacheReady() {
         InitializeCriticalSection(&s_stateTransitionCs);
     }
 }
-// IsGoodPtr is now defined in memory_reader.h
+// IsGoodPtr is defined in memory_reader.h
 static float Distance2D(float ax, float az, float bx, float bz) {
     float dx = ax - bx;
     float dz = az - bz;
@@ -312,26 +341,10 @@ static BYTE SkillKeyFromIndex(int index) {
     if (index < 0) index = 0;
     return (index == 9) ? (BYTE)'0' : (BYTE)('1' + index);
 }
-static bool IsReliableTownMapId(int mapId) {
-    // 0/-1 在目前偏移讀取裡經常代表 unknown/fallback，不可用來判斷城鎮。
-    return mapId > 0 && mapId <= 65535;
-}
-bool IsTownMap(int mapId) {
-    if (!IsReliableTownMapId(mapId)) return false;
-    bool found = false;
-    EnterCriticalSection(&g_cfg.cs_protected);
-    for (int id : g_cfg.townMapIds) {
-        if (IsReliableTownMapId(id) && id == mapId) { found = true; break; }
-    }
-    LeaveCriticalSection(&g_cfg.cs_protected);
-    return found;
-}
 static bool HasTownMapConfig() {
     bool hasConfig = false;
     EnterCriticalSection(&g_cfg.cs_protected);
-    for (int id : g_cfg.townMapIds) {
-        if (IsReliableTownMapId(id)) { hasConfig = true; break; }
-    }
+    hasConfig = !g_cfg.townMapIds.empty();
     LeaveCriticalSection(&g_cfg.cs_protected);
     return hasConfig;
 }
@@ -356,58 +369,151 @@ static const char* GetInventoryScanStatusName(InventoryScanStatus status) {
     }
 }
 static bool IsPlausibleMapId(int mapId) {
-    // 允許 0（表示讀取失敗時使用相對模式）
-    if (mapId == 0) return true;
-    if (mapId < 0) return true;  // 允許 -1
-    return (mapId >= 1 && mapId <= 65535);
+    // ✅ 擴展地圖 ID 範圍：原 0-32767 可能不夠
+    // 允許 0 到 65535 (WORD 範圍) 或 -1 (未知)
+    return (mapId >= 0 && mapId <= 65535) || mapId == -1;
 }
-
-// ============================================================
-// Pattern Scan Status
-// ============================================================
-bool TriggerPatternScanIfNeeded(GameHandle* gh) {
+static bool TryReadLegacyStaticMapId(GameHandle* gh, int* outMapId, DWORD* outOffset) {
+    if (outMapId) *outMapId = -1;
+    if (outOffset) *outOffset = 0;
     if (!gh || !gh->hProcess || !gh->baseAddr) return false;
 
-    DWORD now = GetTickCount();
+    static const DWORD kMapCandidates[] = {
+        0x92E044,
+        0x92E048,
+    };
 
-    // 每 30 秒最多嘗試一次 Pattern Scan
-    if (now - s_lastPatternScanTime < 30000) return s_patternScanFailed;
-
-    // 首次嘗試掃描
-    if (!s_patternScanFailed) {
-        Logf("PatternScan", "嘗試 AOB Pattern Scan 動態解析偏移...");
-
-        // 安全：取得實際模組大小，避免掃描越界
-        DWORD moduleSize = GetGameModuleSize(gh);
-        if (moduleSize == 0) {
-            Logf("PatternScan", "❌ 無法取得模組大小，跳過 Pattern Scan");
-            s_patternScanFailed = true;
-            s_lastPatternScanTime = now;
-            return false;
+    int zeroFallback = -1;
+    DWORD zeroFallbackOffset = 0;
+    for (DWORD candidate : kMapCandidates) {
+        int mapId = SafeRPM<int>(gh->hProcess, gh->baseAddr + candidate, -1);
+        if (!IsPlausibleMapId(mapId)) continue;
+        if (mapId == 0) {
+            if (zeroFallbackOffset == 0) {
+                zeroFallback = mapId;
+                zeroFallbackOffset = candidate;
+            }
+            continue;
         }
+        if (outMapId) *outMapId = mapId;
+        if (outOffset) *outOffset = candidate;
+        return true;
+    }
+    if (zeroFallbackOffset != 0) {
+        if (outMapId) *outMapId = zeroFallback;
+        if (outOffset) *outOffset = zeroFallbackOffset;
+        return true;
+    }
+    return false;
+}
+static bool TryReadLegacyStaticPos(GameHandle* gh, float* outX, float* outY, float* outZ,
+    DWORD* outXOffset, DWORD* outYOffset, DWORD* outZOffset) {
+    if (outX) *outX = 0.0f;
+    if (outY) *outY = 0.0f;
+    if (outZ) *outZ = 0.0f;
+    if (outXOffset) *outXOffset = 0;
+    if (outYOffset) *outYOffset = 0;
+    if (outZOffset) *outZOffset = 0;
+    if (!gh || !gh->hProcess || !gh->baseAddr) return false;
 
-        bool scanResult = PatternScanner::ScanAllOffsets(
-            gh->hProcess,
-            (DWORD)gh->baseAddr,
-            moduleSize
-        );
+    struct PosCandidate {
+        DWORD x;
+        DWORD y;
+        DWORD z;
+    };
+    static const PosCandidate kPosCandidates[] = {
+        {0x92E050, 0x92E058, 0x92E054},
+        {0x92E050, 0x92E05A, 0x92E054},
+    };
 
-        if (scanResult) {
-            Logf("PatternScan", "✅ Pattern Scan 成功");
-            s_lastPatternScanTime = now;
-            return true;
-        } else {
-            Logf("PatternScan", "❌ Pattern Scan 失敗，靜態偏移已失效");
-            Logf("PatternScan", "  建議：使用 Cheat Engine 重新掃描偏移");
-            s_patternScanFailed = true;
-            s_lastPatternScanTime = now;
-            return false;
+    for (const PosCandidate& candidate : kPosCandidates) {
+        float x = SafeRPM<float>(gh->hProcess, gh->baseAddr + candidate.x, 0.0f);
+        float z = SafeRPM<float>(gh->hProcess, gh->baseAddr + candidate.z, 0.0f);
+        if (!HasUsableWorldPos(x, z)) continue;
+
+        float y = SafeRPM<float>(gh->hProcess, gh->baseAddr + candidate.y, 0.0f);
+        if (outX) *outX = x;
+        if (outY) *outY = y;
+        if (outZ) *outZ = z;
+        if (outXOffset) *outXOffset = candidate.x;
+        if (outYOffset) *outYOffset = candidate.y;
+        if (outZOffset) *outZOffset = candidate.z;
+        return true;
+    }
+    return false;
+}
+static void ApplyLegacyStaticPlayerFallbacks(GameHandle* gh, PlayerState* st,
+    bool* usedMapFallback, bool* usedPosFallback) {
+    if (usedMapFallback) *usedMapFallback = false;
+    if (usedPosFallback) *usedPosFallback = false;
+    if (!gh || !st) return;
+
+    DWORD mapOffset = 0;
+    if (!IsPlausibleMapId(st->mapId)) {
+        int legacyMapId = -1;
+        if (TryReadLegacyStaticMapId(gh, &legacyMapId, &mapOffset)) {
+            st->mapId = legacyMapId;
+            if (usedMapFallback) *usedMapFallback = true;
         }
     }
 
+    DWORD posXOffset = 0, posYOffset = 0, posZOffset = 0;
+    if (!HasUsableWorldPos(st->x, st->z)) {
+        float legacyX = 0.0f, legacyY = 0.0f, legacyZ = 0.0f;
+        if (TryReadLegacyStaticPos(gh, &legacyX, &legacyY, &legacyZ,
+            &posXOffset, &posYOffset, &posZOffset)) {
+            st->x = legacyX;
+            st->y = legacyY;
+            st->z = legacyZ;
+            if (usedPosFallback) *usedPosFallback = true;
+        }
+    }
+
+    DWORD now = GetTickCount();
+    if ((mapOffset || posXOffset) && now - s_lastLegacyOffsetLog > 5000) {
+        char detail[192] = {0};
+        if (mapOffset && posXOffset) {
+            _snprintf_s(detail, sizeof(detail), _TRUNCATE,
+                "Map[%d]=0x%08X Pos[(%.1f,%.1f,%.1f)]=0x%08X/0x%08X/0x%08X",
+                st->mapId, mapOffset, st->x, st->y, st->z, posXOffset, posYOffset, posZOffset);
+        } else if (mapOffset) {
+            _snprintf_s(detail, sizeof(detail), _TRUNCATE, "Map[%d]=0x%08X", st->mapId, mapOffset);
+        } else {
+            _snprintf_s(detail, sizeof(detail), _TRUNCATE,
+                "Pos[(%.1f,%.1f,%.1f)]=0x%08X/0x%08X/0x%08X",
+                st->x, st->y, st->z, posXOffset, posYOffset, posZOffset);
+        }
+        Logf("讀取", "↩️ 啟用 legacy 靜態偏移 fallback: %s", detail);
+        s_lastLegacyOffsetLog = now;
+    }
+}
+static bool IsPlausibleTargetState(int hasTarget, DWORD targetId) {
+    if (hasTarget == 0) {
+        return targetId == 0 || targetId == 0xFFFFFFFF;
+    }
+    if (hasTarget == 1) {
+        return targetId != 0 && targetId != 0xFFFFFFFF;
+    }
     return false;
 }
+static void ApplyLegacyStaticTargetFallbacks(GameHandle* gh, PlayerState* st) {
+    if (!gh || !gh->hProcess || !gh->baseAddr || !st) return;
 
+    DWORD currentTargetId = st->targetId;
+    int currentHasTarget = st->hasTarget;
+
+    DWORD legacyTargetId = SafeRPM<DWORD>(gh->hProcess, gh->baseAddr + 0x92F0E8, 0xFFFFFFFF);
+    int legacyHasTarget = SafeRPM<int>(gh->hProcess, gh->baseAddr + 0x92FCB4, 0);
+
+    bool currentPlausible = IsPlausibleTargetState(currentHasTarget, currentTargetId);
+    bool legacyPlausible = IsPlausibleTargetState(legacyHasTarget, legacyTargetId);
+
+    if (!legacyPlausible) return;
+    if (currentPlausible && !(legacyHasTarget == 1 && currentHasTarget != 1)) return;
+
+    st->targetId = legacyTargetId;
+    st->hasTarget = legacyHasTarget;
+}
 // ============================================================
 // Logging
 // ============================================================
@@ -452,6 +558,9 @@ void Logf(const char* tag, const char* fmt, ...) {
 // Anti-Debug Protection
 // ============================================================
 static void InitAntiDebugProtection() {
+#if !defined(_M_IX86) || defined(_WIN64)
+    return;
+#else
     __try {
         typedef struct _PEB_FULL {
             BOOLEAN InheritedAddressSpace;
@@ -468,7 +577,7 @@ static void InitAntiDebugProtection() {
             ULONG NtGlobalFlag;
             // ... 其餘欄位省略
         } PEB_FULL;
-        PEB_FULL* peb = (PEB_FULL*)READ_PEB_ADDR();
+        PEB_FULL* peb = (PEB_FULL*)__readfsdword(0x30);
         if (peb) {
             peb->BeingDebugged = FALSE;
             peb->NtGlobalFlag = 0;
@@ -477,121 +586,78 @@ static void InitAntiDebugProtection() {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         Log("防偵測", "⚠️ PEB 修改失敗（異常）");
     }
+#endif
 }
-// ============================================================
-// Anti-Debug Hooks（帶 SEH 保護）
-// ============================================================
 static void InitAntiDebugHooks() {
-    __try {
-        Log("防偵測", "正在安裝 Inline Patch Anti-Debug 保護...");
-        HMODULE hK32 = GetModuleHandleA("kernel32.dll");
-        if (!hK32) {
-            Log("防偵測", "⚠️ 無法取得 kernel32.dll 句柄");
-            return;
-        }
-
-        // IsDebuggerPresent Patch
-        DWORD_PTR pIsDbg = (DWORD_PTR)GetProcAddress(hK32, "IsDebuggerPresent");
-        if (pIsDbg) {
-            DWORD oldProt = 0;
-            if (VirtualProtect((LPVOID)pIsDbg, 3, PAGE_EXECUTE_READWRITE, &oldProt)) {
-                BYTE patch[] = { 0x31, 0xC0, 0xC3 };  // xor eax,eax; ret
-                memcpy((void*)pIsDbg, patch, sizeof(patch));
-                VirtualProtect((LPVOID)pIsDbg, 3, oldProt, &oldProt);
-                Log("防偵測", "✓ IsDebuggerPresent Patch");
+#if !defined(_M_IX86) || defined(_WIN64)
+    return;
+#else
+    auto ResolveExportTarget = [](DWORD_PTR p) -> DWORD_PTR {
+        if (!p) return 0;
+        __try {
+            BYTE* b = (BYTE*)p;
+            if (b[0] == 0xE9) {
+                int rel = *(int*)(b + 1);
+                return (DWORD_PTR)(b + 5 + rel);
             }
-        }
-
-        // DebugBreak Patch
-        DWORD_PTR pDbgBrk = (DWORD_PTR)GetProcAddress(hK32, "DebugBreak");
-        if (pDbgBrk) {
-            DWORD oldProt = 0;
-            if (VirtualProtect((LPVOID)pDbgBrk, 1, PAGE_EXECUTE_READWRITE, &oldProt)) {
-                BYTE patch[] = { 0xC3 };  // ret
-                memcpy((void*)pDbgBrk, patch, sizeof(patch));
-                VirtualProtect((LPVOID)pDbgBrk, 1, oldProt, &oldProt);
-                Log("防偵測", "✓ DebugBreak Patch");
+            if (b[0] == 0xFF && b[1] == 0x25) {
+                DWORD addr = *(DWORD*)(b + 2);
+                DWORD_PTR target = *(DWORD_PTR*)addr;
+                return target;
             }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
         }
+        return p;
+    };
 
-        // CheckRemoteDebuggerPresent Patch
-        DWORD_PTR pChkRemote = (DWORD_PTR)GetProcAddress(hK32, "CheckRemoteDebuggerPresent");
-        if (pChkRemote) {
-            DWORD oldProt = 0;
-            if (VirtualProtect((LPVOID)pChkRemote, 16, PAGE_EXECUTE_READWRITE, &oldProt)) {
-                BYTE patch[] = {
-                    0x8B, 0x44, 0x24, 0x08,  // mov eax, [esp+8]
-                    0xC7, 0x00, 0x00, 0x00, 0x00, 0x00,  // mov [eax], 0
-                    0x31, 0xC0,              // xor eax, eax
-                    0x40,                    // inc eax
-                    0xC2, 0x08, 0x00         // ret 8
-                };
-                memcpy((void*)pChkRemote, patch, sizeof(patch));
-                VirtualProtect((LPVOID)pChkRemote, 16, oldProt, &oldProt);
-                Log("防偵測", "✓ CheckRemoteDebuggerPresent Patch");
-            }
-        }
-
-        Log("防偵測", "✓ Anti-Debug 保護安裝完成");
+    Log("防偵測", "正在安裝 Inline Patch Anti-Debug 保護...");
+    HMODULE hK32 = GetModuleHandleA("kernel32.dll");
+    if (!hK32) {
+        Log("防偵測", "⚠️ 無法取得 kernel32.dll 句柄");
+        return;
     }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        Log("防偵測", "⚠️ Anti-Debug Hook 安裝失敗（安全繼續）");
+    HMODULE hKB = GetModuleHandleA("KernelBase.dll");
+    DWORD_PTR pIsDbg = (DWORD_PTR)GetProcAddress(hKB ? hKB : hK32, "IsDebuggerPresent");
+    if (pIsDbg) {
+        pIsDbg = ResolveExportTarget(pIsDbg);
+        DWORD oldProt = 0;
+        if (VirtualProtect((LPVOID)pIsDbg, 3, PAGE_EXECUTE_READWRITE, &oldProt)) {
+            BYTE patch[] = { 0x31, 0xC0, 0xC3 };
+            memcpy((void*)pIsDbg, patch, sizeof(patch));
+            VirtualProtect((LPVOID)pIsDbg, 3, oldProt, &oldProt);
+            Log("防偵測", "✓ IsDebuggerPresent Patch 成功");
+        }
     }
+    DWORD_PTR pDbgBrk = (DWORD_PTR)GetProcAddress(hKB ? hKB : hK32, "DebugBreak");
+    if (pDbgBrk) {
+        pDbgBrk = ResolveExportTarget(pDbgBrk);
+        DWORD oldProt = 0;
+        if (VirtualProtect((LPVOID)pDbgBrk, 1, PAGE_EXECUTE_READWRITE, &oldProt)) {
+            BYTE patch[] = { 0xC3 };
+            memcpy((void*)pDbgBrk, patch, sizeof(patch));
+            VirtualProtect((LPVOID)pDbgBrk, 1, oldProt, &oldProt);
+            Log("防偵測", "✓ DebugBreak Patch 成功");
+        }
+    }
+    Log("防偵測", "Inline Patch Anti-Debug 保護安裝完成");
+#endif
 }
 // ============================================================
-// Cached player state（執行緒安全版本）
+// Cached player state
 // ============================================================
-static bool s_renderLockHeld = false;  // 防重入標誌
-
 static void UpdateUICache(const PlayerState& st) {
     EnsureUICacheReady();
-    // ✅ 寫入時鎖定渲染，防止半讀取
-    bool needUnlock = false;
-    if (!s_renderLockHeld) {
-        LockRenderData();
-        needUnlock = true;
-    }
     EnterCriticalSection(&s_uiCacheCs);
     s_uiPlayerCache = st;
     LeaveCriticalSection(&s_uiCacheCs);
-    if (needUnlock) UnlockRenderData();
 }
-
-// 無鎖版本（供快速喝水等高頻讀取使用）
-PlayerState GetCachedPlayerStateRaw() {
-    // 不等待，直接讀取（可能讀到半寫入狀態但換來速度）
-    return s_uiPlayerCache;
-}
-
 PlayerState GetCachedPlayerState() {
     EnsureUICacheReady();
     PlayerState st;
-    // ✅ 讀取時鎖定渲染（可重入）
-    bool needUnlock = false;
-    if (!s_renderLockHeld) {
-        LockRenderData();
-        needUnlock = true;
-    }
     EnterCriticalSection(&s_uiCacheCs);
     st = s_uiPlayerCache;
     LeaveCriticalSection(&s_uiCacheCs);
-    if (needUnlock) UnlockRenderData();
     return st;
-}
-
-// 鎖定渲染數據（內部實現 + 公開給 gui_ranbot.cpp 使用）
-void LockRenderData() {
-    EnsureRenderCsReady();
-    EnterCriticalSection(&s_renderCs);
-    s_renderLockHeld = true;
-}
-
-// 解鎖渲染數據（內部實現 + 公開給 gui_ranbot.cpp 使用）
-void UnlockRenderData() {
-    s_renderLockHeld = false;
-    if (InterlockedCompareExchange(&s_renderCsInit, 0, 0) != 0) {
-        LeaveCriticalSection(&s_renderCs);
-    }
 }
 bool HasCachedPlayerStateData() {
     PlayerState st = GetCachedPlayerState();
@@ -622,15 +688,15 @@ static bool RefreshUiPlayerSnapshot(GameHandle* gh, PlayerState* outSnapshot = N
     DWORD base = gh->baseAddr;
     DWORD charAddr = GetLocalCharPtrExternal(gh);
 
-    st.hp = SafeReadHP(gh->hProcess, base + OffsetConfig::PlayerHP());
-    st.maxHp = SafeReadHP(gh->hProcess, base + OffsetConfig::PlayerMaxHP());
-    st.mp = SafeReadHP(gh->hProcess, base + OffsetConfig::PlayerMP());
-    st.maxMp = SafeReadHP(gh->hProcess, base + OffsetConfig::PlayerMaxMP());
-    st.sp = SafeReadHP(gh->hProcess, base + OffsetConfig::PlayerSP());
-    st.maxSp = SafeReadHP(gh->hProcess, base + OffsetConfig::PlayerMaxSP());
-    st.gold = SafeNtRPM<int>(gh->hProcess, base + OffsetConfig::PlayerGold(), MemErrors::HP_INVALID);
-    st.level = SafeRPM<WORD>(gh->hProcess, base + OffsetConfig::PlayerLevel(), 0);
-    st.mapId = SafeReadMapID(gh->hProcess, base + OffsetConfig::PlayerMapID());
+    st.hp = SafeRPM<int>(gh->hProcess, base + OffsetConfig::PlayerHP(), 0);
+    st.maxHp = SafeRPM<int>(gh->hProcess, base + OffsetConfig::PlayerMaxHP(), 0);
+    st.mp = SafeRPM<int>(gh->hProcess, base + OffsetConfig::PlayerMP(), 0);
+    st.maxMp = SafeRPM<int>(gh->hProcess, base + OffsetConfig::PlayerMaxMP(), 0);
+    st.sp = SafeRPM<int>(gh->hProcess, base + OffsetConfig::PlayerSP(), 0);
+    st.maxSp = SafeRPM<int>(gh->hProcess, base + OffsetConfig::PlayerMaxSP(), 0);
+    st.gold = SafeRPM<int>(gh->hProcess, base + OffsetConfig::PlayerGold(), 0);
+    st.level = SafeRPM<int>(gh->hProcess, base + OffsetConfig::PlayerLevel(), 0);
+    st.mapId = SafeRPM<int>(gh->hProcess, base + OffsetConfig::PlayerMapID(), 0);
     st.combatPower = SafeRPM<int>(gh->hProcess, base + OffsetConfig::PlayerCombatPower(), 0);
     st.str = SafeRPM<int>(gh->hProcess, base + OffsetConfig::PlayerSTR(), 0);
     st.vit = SafeRPM<int>(gh->hProcess, base + OffsetConfig::PlayerVIT(), 0);
@@ -648,16 +714,14 @@ static bool RefreshUiPlayerSnapshot(GameHandle* gh, PlayerState* outSnapshot = N
         }
     }
 
-    // ✅ 驗證玩家數據有效性：檢查錯誤碼
-    bool hasValidData = (st.maxHp > MemErrors::HP_INVALID || st.maxMp > MemErrors::HP_INVALID || st.maxSp > MemErrors::HP_INVALID ||
-                         st.level > 0 || st.gold > MemErrors::HP_INVALID || st.combatPower > 0 ||
-                         st.physAtkMin > 0 || st.sprAtkMin > 0 ||
-                         (st.targetId != 0 && st.targetId != 0xFFFFFFFF));
+    // ✅ 驗證玩家數據有效性：需要至少一項有效數據
+    bool hasValidData =
+        (st.level > 0) &&
+        (IsPlausibleMapId(st.mapId)) &&
+        (st.combatPower > 0 || st.physAtkMin > 0 || st.sprAtkMin > 0 ||
+         st.maxHp > 0 || st.maxMp > 0 || st.maxSp > 0 ||
+         (st.targetId != 0 && st.targetId != 0xFFFFFFFF));
     if (!hasValidData) {
-        // MapID 若是錯誤碼，更新 reason
-        if (st.mapId == MemErrors::MAPID_INVALID) {
-            Log("錯誤", "[ERROR] MapID read failed - protected memory region or stale pointer");
-        }
         return false;
     }
 
@@ -670,53 +734,109 @@ static bool RefreshUiPlayerSnapshot(GameHandle* gh, PlayerState* outSnapshot = N
 // ============================================================
 static bool s_entityPoolKnownBad = false;
 static DWORD s_entityPoolBadTime = 0;
-
 static DWORD GetCROWListHead(GameHandle* gh) {
     if (!gh || !gh->hProcess || !gh->baseAddr) return 0;
-
-    // EntityPool 冷卻期（2秒）
-    // 當讀取失敗時進入冷卻，避免頻繁重試
     if (s_entityPoolKnownBad) {
         DWORD now = GetTickCount();
         if (now - s_entityPoolBadTime < 2000) {
-            return 0;  // 冷卻中，等待 Pattern Scan 恢復
+            // 冷卻期（2秒），返回 0 讓 EnumerateCrows 使用 Fallback
+            return 0;
         }
         s_entityPoolKnownBad = false;
     }
-
     DWORD charAddr = GetLocalCharPtrExternal(gh);
     if (!charAddr) return 0;
-
     DWORD landMan = SafeRPM<DWORD>(gh->hProcess, charAddr + OffsetConfig::EntityLandManPtr(), 0);
     if (!IsGoodPtr(landMan)) {
         s_entityPoolKnownBad = true;
         s_entityPoolBadTime = GetTickCount();
         return 0;
     }
-
     DWORD head = SafeRPM<DWORD>(gh->hProcess, landMan + OffsetConfig::EntityCROWList(), 0);
     if (!IsGoodPtr(head)) return 0;
-
     return head;
 }
 struct CrowInfo {
     DWORD serverId;
-    DWORD crowDataPtr;
+    float x, y, z;
     DWORD hp;
     DWORD maxHp;
-    float x, y, z;
+    DWORD crowDataPtr;
 };
+// ============================================================
+// EnumerateCrows_Fallback - 直接記憶體掃描（基於用戶 CE 分析）
+// 掃描範圍: gameBase + 0x1D0000 ~ gameBase + 0x2D0000
+// 怪物結構: HP @ base+0x7B0, ServerID @ base+0x91C
+// ============================================================
+static int EnumerateCrows_Fallback(GameHandle* gh, CrowInfo* outCrows, int maxCrows) {
+    if (!gh || !gh->hProcess || !gh->baseAddr || !outCrows) return 0;
 
-// ============================================================
-// EnumerateCrows - 實體列舉（移除 legacy fallback）
-// 返回值：
-//   > 0: 找到的怪物數量
-//   = 0: 讀取失敗或無怪物（使用 MemErrors 錯誤碼）
-// ============================================================
+    // 掃描範圍：遊戲基址往上一段記憶體（怪物集中區域）
+    DWORD scanBase = gh->baseAddr + 0x1D0000;
+    DWORD scanEnd = gh->baseAddr + 0x2D0000;
+    const int SCAN_STEP = 0x1000;  // 4KB 顆粒度
+    const int MAX_HP_REASONABLE = 10000000;  // 最大合理 HP
+
+    int count = 0;
+    DWORD addr = scanBase;
+
+    while (addr < scanEnd && count < maxCrows) {
+        // 快速檢查是否為有效的記憶體頁
+        MEMORY_BASIC_INFORMATION memInfo{};
+        if (VirtualQueryEx(gh->hProcess, reinterpret_cast<LPCVOID>((DWORD_PTR)addr), &memInfo, sizeof(memInfo))) {
+            if (memInfo.State == MEM_COMMIT && (memInfo.Protect & (PAGE_READONLY | PAGE_READWRITE))) {
+                // 檢查這個區塊內的候選 HP 地址（每 0x1000 位址檢查多個候選）
+                for (DWORD offset = 0; offset < 0x1000 && count < maxCrows; offset += 0x100) {
+                    DWORD candidate = addr + offset;
+                    DWORD hp = SafeRPM<DWORD>(gh->hProcess, candidate + 0x7B0, 0);
+
+                    // HP 合理性檢查：非零、小於合理最大值
+                    if (hp > 0 && hp < MAX_HP_REASONABLE) {
+                        // 進一步驗證：檢查 ServerID 是否有效
+                        DWORD serverId = SafeRPM<DWORD>(gh->hProcess, candidate + 0x91C, 0);
+
+                        // 有效 ServerID：非零、非FFFFFFFF、在合理範圍
+                        // MID應該 < 1024, SID < 64
+                        DWORD mid = (serverId >> 8) & 0x3FF;
+                        DWORD sid = serverId & 0x3F;
+
+                        if (serverId != 0 && serverId != 0xFFFFFFFF &&
+                            mid < 1024 && sid < 64 && mid > 0) {
+
+                            CrowInfo& ci = outCrows[count];
+                            ci.serverId = serverId;
+                            ci.crowDataPtr = candidate;
+                            ci.hp = hp;
+                            WORD maxHp = SafeRPM<WORD>(gh->hProcess, candidate + OffsetConfig::CrowMaxHP(), 0);
+                            ci.maxHp = maxHp > 0 ? (DWORD)maxHp : hp;
+                            ci.x = SafeRPM<float>(gh->hProcess, candidate + 0x878, 0.0f);
+                            ci.y = SafeRPM<float>(gh->hProcess, candidate + 0x87C, 0.0f);
+                            ci.z = SafeRPM<float>(gh->hProcess, candidate + 0x880, 0.0f);
+
+                            if (count < 5) {
+                                Logf("掃描", "怪物[%d]: ID=0x%X MID=%d SID=%d HP=%d @ 0x%X",
+                                    count, serverId, mid, sid, hp, candidate);
+                            }
+                            count++;
+                        }
+                    }
+                }
+            }
+        }
+        addr += SCAN_STEP;
+    }
+
+    if (count > 0) {
+        Logf("掃描", "直接掃描找到 %d 隻怪物", count);
+    }
+
+    return count;
+}
+
 static int EnumerateCrows(GameHandle* gh, CrowInfo* outCrows, int maxCrows) {
     if (!gh || !gh->baseAddr || !outCrows) return 0;
 
-    // ── 嘗試 NetHook 共享記憶體（首選方案）──
+    // ── 嘗試 NetHook 共享記憶體（若可用）──
     if (NetHookShmem_IsConnected()) {
         ShmemEntity entities[200];
         int count = NetHookShmem_EnumerateEntities(entities, 200);
@@ -741,59 +861,70 @@ static int EnumerateCrows(GameHandle* gh, CrowInfo* outCrows, int maxCrows) {
     }
 
     // ── CROwList 直接讀取（需要 hProcess）──
-    if (!gh->hProcess) {
-        Logf("掃描", "EnumerateCrows: hProcess 無效，無法讀取");
-        return 0;
-    }
-
+    if (!gh->hProcess) return 0;
     DWORD headNode = GetCROWListHead(gh);
-    if (!headNode) {
-        // EntityPool 不可用，狀態機應進入 RECOVERY 等待 Pattern Scan 恢復
-        return 0;
-    }
-
-    int count = 0;
-    DWORD nodeAddr = headNode;
-    DWORD visited[200];
-    int visitCount = 0;
-
-    while (nodeAddr && count < maxCrows && visitCount < OffsetConfig::EntityMaxCrows()) {
-        bool alreadyVisited = false;
-        for (int i = 0; i < visitCount; i++) {
-            if (visited[i] == nodeAddr) { alreadyVisited = true; break; }
-        }
-        if (alreadyVisited) break;
-        visited[visitCount++] = nodeAddr;
-
-        DWORD crowPtr = SafeRPM<DWORD>(gh->hProcess, nodeAddr + OffsetConfig::CrowNodeCrowPtr(), 0);
-        DWORD nextNode = SafeRPM<DWORD>(gh->hProcess, nodeAddr + OffsetConfig::CrowNodeNext(), 0);
-
-        if (crowPtr && IsGoodPtr(crowPtr)) {
-            DWORD crowData = SafeRPM<DWORD>(gh->hProcess, crowPtr + OffsetConfig::CrowDataPtr(), 0);
-            if (crowData && IsGoodPtr(crowData)) {
-                CrowInfo& ci = outCrows[count];
-                ci.serverId = SafeRPM<DWORD>(gh->hProcess, crowPtr + OffsetConfig::CrowServerID(), 0);
-                ci.crowDataPtr = crowData;
-                ci.hp = SafeRPM<DWORD>(gh->hProcess, crowPtr + OffsetConfig::CrowHP(), 0);
-                WORD maxHp = SafeRPM<WORD>(gh->hProcess, crowPtr + OffsetConfig::CrowMaxHP(), 0);
-                ci.maxHp = maxHp > 0 ? (DWORD)maxHp : ci.hp;
-                ci.x = SafeRPM<float>(gh->hProcess, crowPtr + OffsetConfig::CrowPosX(), 0.0f);
-                ci.y = SafeRPM<float>(gh->hProcess, crowPtr + OffsetConfig::CrowPosY(), 0.0f);
-                ci.z = SafeRPM<float>(gh->hProcess, crowPtr + OffsetConfig::CrowPosZ(), 0.0f);
-
-                if (ci.serverId != 0 && ci.serverId != 0xFFFFFFFF && ci.hp > 0) {
-                    count++;
+    if (headNode) {
+        int count = 0;
+        DWORD nodeAddr = headNode;
+        DWORD visited[200];
+        int visitCount = 0;
+        while (nodeAddr && count < maxCrows && visitCount < OffsetConfig::EntityMaxCrows()) {
+            bool alreadyVisited = false;
+            for (int i = 0; i < visitCount; i++) {
+                if (visited[i] == nodeAddr) { alreadyVisited = true; break; }
+            }
+            if (alreadyVisited) break;
+            visited[visitCount++] = nodeAddr;
+            DWORD crowPtr = SafeRPM<DWORD>(gh->hProcess, nodeAddr + OffsetConfig::CrowNodeCrowPtr(), 0);
+            DWORD nextNode = SafeRPM<DWORD>(gh->hProcess, nodeAddr + OffsetConfig::CrowNodeNext(), 0);
+            if (crowPtr && IsGoodPtr(crowPtr)) {
+                DWORD crowData = SafeRPM<DWORD>(gh->hProcess, crowPtr + OffsetConfig::CrowDataPtr(), 0);
+                if (crowData && IsGoodPtr(crowData)) {
+                    CrowInfo& ci = outCrows[count];
+                    ci.serverId = SafeRPM<DWORD>(gh->hProcess, crowPtr + OffsetConfig::CrowServerID(), 0);
+                    ci.crowDataPtr = crowData;
+                    ci.hp = SafeRPM<DWORD>(gh->hProcess, crowPtr + OffsetConfig::CrowHP(), 0);
+                    WORD maxHp = SafeRPM<WORD>(gh->hProcess, crowPtr + OffsetConfig::CrowMaxHP(), 0);
+                    ci.maxHp = maxHp > 0 ? (DWORD)maxHp : ci.hp;
+                    ci.x = SafeRPM<float>(gh->hProcess, crowPtr + OffsetConfig::CrowPosX(), 0.0f);
+                    ci.y = SafeRPM<float>(gh->hProcess, crowPtr + OffsetConfig::CrowPosY(), 0.0f);
+                    ci.z = SafeRPM<float>(gh->hProcess, crowPtr + OffsetConfig::CrowPosZ(), 0.0f);
+                    if (ci.serverId != 0 && ci.serverId != 0xFFFFFFFF && ci.hp > 0) {
+                        count++;
+                    }
                 }
             }
+            nodeAddr = nextNode;
         }
-        nodeAddr = nextNode;
+        if (count > 0) return count;
     }
 
-    if (count > 0) {
-        return count;
+    // ── Fallback：直接記憶體掃描 ──
+    static DWORD s_lastFallbackScan = 0;
+    static int s_lastFallbackCount = 0;
+    static CrowInfo s_fallbackCache[200] = {};
+    DWORD now = GetTickCount();
+    int cacheLimit = (int)(sizeof(s_fallbackCache) / sizeof(s_fallbackCache[0]));
+
+    if (now - s_lastFallbackScan <= 5000 && s_lastFallbackCount > 0) {
+        int copyCount = s_lastFallbackCount;
+        if (copyCount > maxCrows) copyCount = maxCrows;
+        memcpy(outCrows, s_fallbackCache, sizeof(CrowInfo) * copyCount);
+        return copyCount;
     }
 
-    // 無怪物時返回 0，狀態機需要處理此情況
+    int fallbackCount = EnumerateCrows_Fallback(gh, s_fallbackCache, cacheLimit);
+    if (fallbackCount > 0) {
+        s_lastFallbackScan = now;
+        s_lastFallbackCount = fallbackCount;
+        int copyCount = fallbackCount;
+        if (copyCount > maxCrows) copyCount = maxCrows;
+        memcpy(outCrows, s_fallbackCache, sizeof(CrowInfo) * copyCount);
+        return copyCount;
+    }
+
+    s_lastFallbackScan = now;
+    s_lastFallbackCount = 0;
     return 0;
 }
 
@@ -840,6 +971,32 @@ static int EnumeratePCs(GameHandle* gh, PCInfo* outPCs, int maxPCs) {
     }
     return count;
 }
+static bool RefreshPlayerServerId(GameHandle* gh, const PlayerState& st, DWORD* outServerId) {
+    if (outServerId) *outServerId = 0;
+    if (!gh || !gh->hProcess || !gh->baseAddr) return false;
+    if (!HasUsableWorldPos(st.x, st.z)) return false;
+    PCInfo pcs[32];
+    int pcCount = EnumeratePCs(gh, pcs, 32);
+    if (pcCount <= 0) return false;
+    float bestDist = 99999.0f;
+    DWORD bestId = 0;
+    for (int i = 0; i < pcCount; i++) {
+        const PCInfo& pi = pcs[i];
+        if (pi.serverId == 0 || pi.serverId == 0xFFFFFFFF) continue;
+        if (!HasUsableWorldPos(pi.x, pi.z)) continue;
+        if ((int)pi.hp != st.hp) continue;
+        float d = Distance2D(st.x, st.z, pi.x, pi.z);
+        if (d < bestDist) {
+            bestDist = d;
+            bestId = pi.serverId;
+        }
+    }
+    if (bestId != 0 && bestDist < 10.0f) {
+        if (outServerId) *outServerId = bestId;
+        return true;
+    }
+    return false;
+}
 // ============================================================
 // 背包快取
 // ============================================================
@@ -850,46 +1007,6 @@ static CRITICAL_SECTION s_invCacheCs;
 // ============================================================
 // Public bot API
 // ============================================================
-// Helper for SEH-protected initialization (separated to avoid C2712)
-static void InitBotLogic_SafeInits() {
-    __try {
-        InitAttackSender("210.64.10.55", 6870);
-        UIAddLog("[Bot] 攻擊封包發送器已初始化");
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        UIAddLog("[Bot] ⚠️ InitAttackSender 失敗（安全繼續）");
-    }
-
-    __try {
-        CoordCalibrator::Instance().Load();
-        Log("校正", "座標校正已載入");
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        Log("校正", "⚠️ CoordCalibrator::Load 失敗（安全繼續）");
-    }
-
-    __try {
-        DMVisual::Init();
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        Log("DM", "⚠️ DMVisual::Init 失敗（安全繼續）");
-    }
-
-    __try {
-        InitFSM();
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        Log("FSM", "⚠️ InitFSM 失敗（安全繼續）");
-    }
-
-    __try {
-        VisualSupply::Init();
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        Log("視覺", "⚠️ VisualSupply::Init 失敗（安全繼續）");
-    }
-}
-
 void InitBotLogic() {
     EnsureUICacheReady();
     InitializeCriticalSection(&s_invCacheCs);
@@ -897,7 +1014,17 @@ void InitBotLogic() {
     g_State.store((int)BotState::IDLE);
     g_cfg.active.store(false);
     s_entityPoolKnownBad = false;
+    s_curBar = -1;
     srand((unsigned int)time(nullptr));
+    DWORD now = GetTickCount();
+    DWORD initTime = now - 500;
+    for (int i = 0; i < BotConfig::MAX_SKILLS; i++) {
+        s_skillLastTime[i] = initTime;
+    }
+    s_lastCombatTick = 0;
+    s_returnSourceValid = false;
+    s_backToFieldSourceValid = false;
+    s_backToFieldSourceWasTown = false;
     s_hasLastValidPlayerState = false;
     s_lastValidPlayerStateTime = 0;
     s_consecutiveReadFail = 0;
@@ -905,25 +1032,7 @@ void InitBotLogic() {
     s_wasInHunting = false;
     s_enteredDeadState = false;
     s_loggedDead = false;
-    // town_index 只代表補給城鎮選項；MapID 必須是可靠讀值才可用來判斷城鎮。
-    {
-        // 0 目前是未知值，不可作為城鎮 MapID。
-        static const int townMapIdTable[] = { 0, 1, 2, 3 };
-        int idx = g_cfg.town_index.load();
-        g_cfg.townMapIds.clear();
-        if (idx >= 0 && idx <= 3) {
-            int mapId = townMapIdTable[idx];
-            if (IsReliableTownMapId(mapId)) {
-                g_cfg.townMapIds.push_back(mapId);
-                Logf("狀態機", "✅ 城鎮地圖 ID 已設置: town_index=%d, mapId=%d",
-                     idx, mapId);
-            } else {
-                Logf("狀態機",
-                    "⚠️ 城鎮 MapID=%d 不可信，已停用 StartInTown/MapID 城鎮判斷；請不要用 0 當城鎮 ID",
-                    mapId);
-            }
-        }
-    }
+    s_loggedReturn = false;
     if (g_cfg.protected_item_ids.empty()) {
         for (int i = 0; i < BotConfig::defaultProtectedCount; i++) {
             int id = BotConfig::defaultProtectedItems[i].id;
@@ -937,45 +1046,24 @@ void InitBotLogic() {
             Log("保護", "請在設定中手動添加保護物品");
         }
     }
-
-    // PEB 反偵測（各有 try/except）
+    // ✅ BUG-007 FIX: InitAttackSender 非阻塞（連線在背景線程完成）
+    // InitAttackSender 現在是非阻塞的，TCP 連線在後台線程完成
+    // 這樣 InitBotLogic 不會因為伺服器無回應而卡住
+    InitAttackSender("210.64.10.55", 6870);
+    UIAddLog("[Bot] 攻擊封包發送器已初始化（非阻塞）");
+    // ScreenshotAssist is deprecated - using screenshot_universal.cpp instead
+    // if (ScreenshotAssist_Init()) {
+    //     UIAddLog("[截圖] 輔助比對已就緒");
+    // } else {
+    //     UIAddLog("[截圖] 輔助比對初始化失敗");
+    // }
     InitAntiDebugProtection();
     InitAntiDebugHooks();
-
-    // 大漠模式預設啟用
-    g_cfg.use_dm_mode.store(true);
-
-    // SEH 保護的初始化
-    InitBotLogic_SafeInits();
-
-    // ── 啟動時自動載入並驗證卡密（如果有的話）──
-    char cachedToken[4096] = {};
-    if (OfflineLicenseLoadCached(cachedToken, sizeof(cachedToken))) {
-        Logf("認證", "發現本地緩存卡密，正在驗證...");
-        UIAddLog("[License] 載入本地緩存，自動驗證中");
-
-        OfflineLicenseInfo info = {};
-        bool ok = OfflineLicenseVerifyToken(cachedToken, NULL, &info);
-        if (ok && info.valid) {
-            g_licenseValid.store(true);
-            Logf("認證", "✅ 自動驗證成功，剩餘 %d 天", info.days_left);
-            UIAddLog("[License] 驗入 %d 天", info.days_left);
-        } else {
-            g_licenseValid.store(false);
-            const char* msg = info.message.empty() ? "驗證失敗" : info.message.c_str();
-            Logf("認證", "❌ 自動驗證失敗: %s", msg);
-            UIAddLog("[License] 驗證失敗: %s", msg);
-        }
-    } else {
-        Log("認證", "無本地緩存卡密，請在 UI 輸入卡密");
-        UIAddLog("[License] 無本地緩存，請輸入卡密");
-    }
-
     Log("系統", "Bot 邏輯初始化完成");
 }
-
 void ShutdownBotLogic() {
     ShutdownAttackSender();
+    // ScreenshotAssist_Shutdown(); // deprecated
     // 只刪除已初始化的 CriticalSection
     if (InterlockedCompareExchange(&s_uiCacheCsInit, 0, 0) != 0) {
         DeleteCriticalSection(&s_uiCacheCs);
@@ -1002,12 +1090,8 @@ static InventoryScanStatus ScanInventoryDetailed(GameHandle* gh, std::vector<Inv
 
     if (!IsGoodPtr(s_invBase)) {
         DWORD now = GetTickCount();
-        const bool relativeOnly = s_relativeOnlyCombatMode.load();
-        DWORD logInterval = relativeOnly ? 15000 : 3000;
-        if (now - s_lastInventoryDiagLog > logInterval) {
-            Log("背包", relativeOnly
-                ? "⚠️ 純相對模式：背包基底暫不可用，跳過背包掃描"
-                : "❌ 背包基底無效，跳過背包掃描");
+        if (now - s_lastInventoryDiagLog > 3000) {
+            Log("背包", "❌ 背包基底無效，跳過背包掃描");
             s_lastInventoryDiagLog = now;
         }
         return InventoryScanStatus::INVALID_BASE;
@@ -1022,12 +1106,8 @@ static InventoryScanStatus ScanInventoryDetailed(GameHandle* gh, std::vector<Inv
         }
         if (!IsGoodPtr(s_invBase)) {
             DWORD now = GetTickCount();
-            const bool relativeOnly = s_relativeOnlyCombatMode.load();
-            DWORD logInterval = relativeOnly ? 15000 : 3000;
-            if (now - s_lastInventoryDiagLog > logInterval) {
-                Log("背包", relativeOnly
-                    ? "⚠️ 純相對模式：背包基底刷新失敗，暫停背包掃描"
-                    : "❌ 背包基底刷新失敗，無法辨識背包內容");
+            if (now - s_lastInventoryDiagLog > 3000) {
+                Log("背包", "❌ 背包基底刷新失敗，無法辨識背包內容");
                 s_lastInventoryDiagLog = now;
             }
             return InventoryScanStatus::INVALID_BASE;
@@ -1072,15 +1152,11 @@ static bool ValidatePlayerStateData(const PlayerState& st, DWORD charAddr, Inven
             st.maxHp, st.maxMp, st.maxSp);
         return false;
     }
-    // 允許死亡狀態（hp=0 但 maxHp > 0）
-    // 死亡時 HP=0 是正常狀態，不應視為讀取失敗
-    // 只有當 hp < 0（不合理）或 hp > maxHp * 20（越界）才是無效
-    bool hpInvalid = (st.hp < 0) || (st.hp > 0 && st.hp > st.maxHp * 20);
-    bool mpInvalid = (st.mp < 0) || (st.mp > 0 && st.mp > st.maxMp * 20);
-    bool spInvalid = (st.sp < 0) || (st.sp > 0 && st.sp > st.maxSp * 20);
-    if (hpInvalid || mpInvalid || spInvalid) {
-        _snprintf_s(reason, reasonSize, _TRUNCATE, "屬性數值越界 HP=%d/%d MP=%d/%d SP=%d/%d",
-            st.hp, st.maxHp, st.mp, st.maxMp, st.sp, st.maxSp);
+    if (st.hp <= 0 || st.hp > st.maxHp * 20 ||
+        st.mp < 0 || st.mp > st.maxMp * 20 ||
+        st.sp < 0 || st.sp > st.maxSp * 20) {
+        _snprintf_s(reason, reasonSize, _TRUNCATE, "屬性數值越界 HP/MP/SP=%d/%d/%d",
+            st.hp, st.mp, st.sp);
         return false;
     }
     return true;
@@ -1094,7 +1170,7 @@ static PlayerStateReadStatus ReadPlayerStateDetailedInternal(GameHandle* gh, Pla
     out->state = (BotState)g_State.load();
     if (reason && reasonSize > 0) reason[0] = '\0';
 
-    if (!gh || !gh->hProcess) {
+    if (!gh || !gh->hProcess || !gh->baseAddr) {
         static DWORD s_lastDiag = 0;
         if (GetTickCount() - s_lastDiag > 3000) {
             Logf("讀取", "❌ ReadPlayerState: gh=%p hProcess=%p baseAddr=0x%08X",
@@ -1107,28 +1183,6 @@ static PlayerStateReadStatus ReadPlayerStateDetailedInternal(GameHandle* gh, Pla
         return PlayerStateReadStatus::READ_FAILED;
     }
 
-    // ── baseAddr==0 時的兜底 refresh ──
-    if (!gh->baseAddr) {
-        static DWORD s_lastBaseRefreshDiag = 0;
-        DWORD refreshed = RefreshGameBaseAddress(gh);
-        if (refreshed) {
-            gh->baseAddr = refreshed;
-            gh->attached = true;
-            if (reason && reasonSize > 0) {
-                _snprintf_s(reason, reasonSize, _TRUNCATE, "baseAddr 刷新成功: 0x%08X", refreshed);
-            }
-            if (GetTickCount() - s_lastBaseRefreshDiag > 3000) {
-                Logf("讀取", "✅ baseAddr 刷新成功: 0x%08X", refreshed);
-                s_lastBaseRefreshDiag = GetTickCount();
-            }
-        } else {
-            if (reason && reasonSize > 0) {
-                _snprintf_s(reason, reasonSize, _TRUNCATE, "baseAddr 刷新失敗");
-            }
-            return PlayerStateReadStatus::READ_FAILED;
-        }
-    }
-
     DWORD base = gh->baseAddr;
     DWORD charAddr = GetLocalCharPtrExternal(gh);
     if (charAddr && IsGoodPtr(charAddr)) {
@@ -1139,7 +1193,7 @@ static PlayerStateReadStatus ReadPlayerStateDetailedInternal(GameHandle* gh, Pla
             nameBuf[21] = '\0';
             memcpy(out->name, nameBuf, 22);
         } else {
-            // 修復：strcpy_s(NULL) 會崩潰
+            // BUG-H001 修復：strcpy_s(NULL) 會崩潰
             if (out && out->name) strcpy_s(out->name, sizeof(out->name), "???");
         }
     } else {
@@ -1154,7 +1208,7 @@ static PlayerStateReadStatus ReadPlayerStateDetailedInternal(GameHandle* gh, Pla
     out->sp = SafeRPM<int>(gh->hProcess, base + OffsetConfig::PlayerSP(), 0);
     out->maxSp = SafeRPM<int>(gh->hProcess, base + OffsetConfig::PlayerMaxSP(), 0);
     out->gold = SafeRPM<int>(gh->hProcess, base + OffsetConfig::PlayerGold(), 0);
-    out->level = SafeRPM<WORD>(gh->hProcess, base + OffsetConfig::PlayerLevel(), 0);
+    out->level = SafeRPM<int>(gh->hProcess, base + OffsetConfig::PlayerLevel(), 0);
     out->exp = SafeRPM<int>(gh->hProcess, base + OffsetConfig::PlayerEXP(), 0);
     out->expMax = SafeRPM<int>(gh->hProcess, base + OffsetConfig::PlayerEXPMax(), 0);
     out->combatPower = SafeRPM<int>(gh->hProcess, base + OffsetConfig::PlayerCombatPower(), 0);
@@ -1169,27 +1223,12 @@ static PlayerStateReadStatus ReadPlayerStateDetailedInternal(GameHandle* gh, Pla
     out->sprAtkMax = SafeRPM<int>(gh->hProcess, base + OffsetConfig::PlayerSprAtkMax(), 0);
     out->arrowCount = SafeRPM<int>(gh->hProcess, base + OffsetConfig::QuickSlotArrowCount(), 0);
     out->talismanCount = SafeRPM<int>(gh->hProcess, base + OffsetConfig::QuickSlotTalismanCount(), 0);
-    out->mapId = SafeReadMapID(gh->hProcess, base + OffsetConfig::PlayerMapID());
-
-    // 調試日誌：30秒一次，減少噪音
-    static DWORD s_lastDebugTime = 0;
-    DWORD now = GetTickCount();
-    bool shouldLog = (now - s_lastDebugTime > 30000);
+    out->mapId = SafeRPM<int>(gh->hProcess, base + OffsetConfig::PlayerMapID(), 0);
 
     bool posResolved = false;
-    DWORD charAddrForDebug = GetLocalCharPtrExternal(gh);
-    if (shouldLog) {
-        Logf("讀取", "DEBUG: charAddr=0x%08X, IsGoodPtr=%d, base=0x%08X, GLCharObj=0x%08X",
-            charAddrForDebug, IsGoodPtr(charAddrForDebug) ? 1 : 0, base, OffsetConfig::GLCharacterObj());
-        s_lastDebugTime = now;
-    }
-
     if (charAddr && IsGoodPtr(charAddr)) {
         float cx = SafeRPM<float>(gh->hProcess, charAddr + OffsetConfig::CrowPosX(), 0.0f);
         float cz = SafeRPM<float>(gh->hProcess, charAddr + OffsetConfig::CrowPosZ(), 0.0f);
-        if (shouldLog) {
-            Logf("讀取", "DEBUG: from charAddr+0x890: cx=%.1f cz=%.1f", cx, cz);
-        }
         if (HasUsableWorldPos(cx, cz)) {
             out->x = cx;
             out->z = cz;
@@ -1198,16 +1237,13 @@ static PlayerStateReadStatus ReadPlayerStateDetailedInternal(GameHandle* gh, Pla
         }
     }
     if (!posResolved) {
-        float wx = SafeRPM<float>(gh->hProcess, base + OffsetConfig::PlayerPosX(), 0.0f);
-        float wz = SafeRPM<float>(gh->hProcess, base + OffsetConfig::PlayerPosZ(), 0.0f);
-        if (shouldLog) {
-            Logf("讀取", "DEBUG: from base+0x92F550: wx=%.1f wz=%.1f", wx, wz);
-        }
+        WORD wx = SafeRPM<WORD>(gh->hProcess, base + OffsetConfig::PlayerPosX(), 0);
+        WORD wz = SafeRPM<WORD>(gh->hProcess, base + OffsetConfig::PlayerPosZ(), 0);
         if (HasUsableWorldPos((float)wx, (float)wz)) {
-            out->x = wx;
-            out->z = wz;
-            float wy = SafeRPM<float>(gh->hProcess, base + OffsetConfig::PlayerPosY(), 0.0f);
-            out->y = wy;
+            out->x = (float)wx;
+            out->z = (float)wz;
+            WORD wy = SafeRPM<WORD>(gh->hProcess, base + OffsetConfig::PlayerPosY(), 0);
+            out->y = (float)wy;
             posResolved = true;
         }
     }
@@ -1242,10 +1278,11 @@ static PlayerStateReadStatus ReadPlayerStateDetailedInternal(GameHandle* gh, Pla
     out->skillLockState = SafeRPM<int>(gh->hProcess, base + OffsetConfig::TargetLockedState(), 0);
     out->attackCount = SafeRPM<int>(gh->hProcess, base + 0x724, 0);
     out->attackRange = SafeRPM<int>(gh->hProcess, base + 0x728, 0);
+    ApplyLegacyStaticTargetFallbacks(gh, out);
 
-    // ============================================================
-    // 庫存讀取（使用明確錯誤碼）
-    // ============================================================
+    bool usedLegacyMap = false;
+    bool usedLegacyPos = false;
+    ApplyLegacyStaticPlayerFallbacks(gh, out, &usedLegacyMap, &usedLegacyPos);
 
     int inventoryCount = 0;
     InventoryScanStatus invStatus = ScanInventoryDetailed(gh, NULL, &inventoryCount);
@@ -1270,11 +1307,8 @@ static PlayerStateReadStatus ReadPlayerStateDetailedInternal(GameHandle* gh, Pla
             strncpy_s(reason, reasonSize, localReason, _TRUNCATE);
         }
         DWORD now = GetTickCount();
-        const bool relativeOnly = s_relativeOnlyCombatMode.load();
-        DWORD logInterval = relativeOnly ? 15000 : 3000;
-        if (now - s_lastInvalidStateLog > logInterval) {
-            Logf("讀取", "%s: %s [GLChar=0x%08X Map=%d x=%.1f z=%.1f HP=%d/%d Inv=%s Offset=%s MapRVA=0x%08X PosXRVA=0x%08X PosZRVA=0x%08X]",
-                relativeOnly ? "⚠️ 純相對模式：記憶體座標暫不可用" : "⚠️ 玩家資料無效",
+        if (now - s_lastInvalidStateLog > 3000) {
+            Logf("讀取", "⚠️ 玩家資料無效: %s [GLChar=0x%08X Map=%d x=%.1f z=%.1f HP=%d/%d Inv=%s Offset=%s MapRVA=0x%08X PosXRVA=0x%08X PosZRVA=0x%08X]",
                 localReason, charAddr, out->mapId, out->x, out->z, out->hp, out->maxHp,
                 GetInventoryScanStatusName(invStatus), OffsetConfig::GetLoadSource(),
                 OffsetConfig::PlayerMapID(), OffsetConfig::PlayerPosX(), OffsetConfig::PlayerPosZ());
@@ -1285,8 +1319,7 @@ static PlayerStateReadStatus ReadPlayerStateDetailedInternal(GameHandle* gh, Pla
 
     if (invStatus == InventoryScanStatus::INVALID_BASE || invStatus == InventoryScanStatus::INVALID_HANDLE) {
         DWORD now = GetTickCount();
-        DWORD logInterval = s_relativeOnlyCombatMode.load() ? 15000 : 5000;
-        if (now - s_lastInventoryDiagLog > logInterval) {
+        if (now - s_lastInventoryDiagLog > 5000) {
             Logf("讀取", "⚠️ 背包狀態未知 (%s)，戰鬥可繼續，補給判定暫停",
                 GetInventoryScanStatusName(invStatus));
             s_lastInventoryDiagLog = now;
@@ -1301,14 +1334,6 @@ static PlayerStateReadStatus ReadPlayerStateDetailedInternal(GameHandle* gh, Pla
 }
 static PlayerStateReadStatus ReadPlayerStateDetailed(GameHandle* gh, PlayerState* out,
     char* reason, size_t reasonSize) {
-    static DWORD s_lastCallDiag = 0;
-    DWORD now = GetTickCount();
-    DWORD logInterval = s_relativeOnlyCombatMode.load() ? 10000 : 3000;
-    if (now - s_lastCallDiag > logInterval) {
-        Logf("讀取", "📍 ReadPlayerStateDetailed called: gh=%p hProcess=%p baseAddr=0x%08X",
-            (void*)gh, gh ? (void*)gh->hProcess : NULL, gh ? gh->baseAddr : 0);
-        s_lastCallDiag = now;
-    }
     return ReadPlayerStateDetailedInternal(gh, out, reason, reasonSize, true);
 }
 bool ReadPlayerState(GameHandle* gh, PlayerState* out) {
@@ -1512,28 +1537,8 @@ void GetPlayerName(char* outName, int maxLen) {
     if (!charAddr) return;
     SIZE_T bytesRead = 0;
     int readLen = (maxLen < 21) ? maxLen : 21;
-
-    // 先讀取原始位元組
-    char rawName[22] = {0};
     ReadProcessMemory(gh.hProcess, (LPCVOID)(charAddr + OffsetConfig::PlayerName()),
-                     rawName, readLen, &bytesRead);
-
-    // 轉換編碼：Big5/GBK -> UTF-8
-    int wideLen = MultiByteToWideChar(950, 0, rawName, -1, NULL, 0);  // 950 = Big5
-    if (wideLen > 0) {
-        wchar_t* wideBuf = new wchar_t[wideLen + 1];
-        MultiByteToWideChar(950, 0, rawName, -1, wideBuf, wideLen);
-        int utf8Len = WideCharToMultiByte(CP_UTF8, 0, wideBuf, -1, NULL, 0, NULL, NULL);
-        if (utf8Len > 0 && utf8Len < maxLen) {
-            WideCharToMultiByte(CP_UTF8, 0, wideBuf, -1, outName, utf8Len, NULL, NULL);
-        } else {
-            WideCharToMultiByte(CP_UTF8, 0, wideBuf, -1, outName, maxLen, NULL, NULL);
-        }
-        delete[] wideBuf;
-    } else {
-        // fallback：直接複製
-        strncpy_s(outName, maxLen, rawName, maxLen - 1);
-    }
+                     outName, readLen, &bytesRead);
     outName[maxLen - 1] = '\0';
 }
 void CacheInventory(GameHandle* gh) {
@@ -1599,6 +1604,7 @@ bool FindNearestMonster(GameHandle* gh, Entity* out) {
     float bestScore = -1.0f;
     for (auto& e : monsters) {
         if (e.isDead || e.hp <= 0) continue;
+        if (IsFailedTarget(e.id)) continue;
         if (e.dist > (float)range) continue;
         float hpRatio = (e.maxHp > 0) ? (float)e.hp / (float)e.maxHp : 1.0f;
         float hpScore = (1.0f - hpRatio) * 50.0f;
@@ -1659,9 +1665,6 @@ static const char* GetStateName(BotState s) {
         case BotState::BACK_TO_FIELD: return "BACK_TO_FIELD";
         case BotState::TRAVELING: return "TRAVELING";
         case BotState::PAUSED: return "PAUSED";
-        case BotState::RANDOM_EVADE: return "RANDOM_EVADE";  // 逃生/脫困狀態
-        case BotState::EMERGENCY_STOP: return "EMERGENCY_STOP";  // VLM 看門狗觸發
-        case BotState::RECOVERY: return "RECOVERY";  // VLM 驅動脫困
         default: return "UNKNOWN";
     }
 }
@@ -1674,13 +1677,26 @@ static void BuildStateSnapshot(const PlayerState* st, char* buf, size_t bufSize)
     _snprintf_s(buf, bufSize, _TRUNCATE, "Map=%d x=%.1f z=%.1f HP=%d/%d",
         st->mapId, st->x, st->z, st->hp, st->maxHp);
 }
-void ResetCombatRuntimeState() {
-    s_currentTargetId.store(0);
-    s_combatIntent.store((int)CombatIntent::SEEKING);
+static void ResetCombatRuntimeState() {
+    s_currentTargetId = 0;
+    s_combatIntent = CombatIntent::SEEKING;
+    s_targetLostTime = 0;
+    s_engageStartTime = 0;
+    s_targetLockTime = 0;
+    s_lastTargetHp = 0;
+    s_hpCheckTime = 0;
+    s_lastCombatTick = 0;
+    s_lastTargetClick = 0;
+    s_curBar = (char)0xFF;
     s_relativeOnlyCombatMode.store(false);
+    s_relativeScanIndex = 0;
+    s_relativeSkillIndex = 0;
     g_cfg.currentSkillIndex.store(0);
     g_cfg.lastRightClickTime.store(0);
     g_cfg.lastSkillTime.store(0);
+    // 重置失敗目標追蹤（避免舊資料殘留）
+    memset(s_failedTargets, 0, sizeof(s_failedTargets));
+    s_failedCount = 0;
 }
 static bool CanUseRelativeOnlyCombat(GameHandle* gh) {
     return gh && gh->attached && gh->hWnd && IsWindow(gh->hWnd);
@@ -1709,8 +1725,6 @@ static void TransitionState(BotState nextState, const char* reason, const Player
         LeaveCriticalSection(&s_stateTransitionCs);
         return;
     }
-    IStateHandler* oldHandler = StateHandlerRegistry::Instance().Get(oldState);
-    IStateHandler* nextHandler = StateHandlerRegistry::Instance().Get(nextState);
 
     const PlayerState* snapshot = st ? st : (s_hasLastValidPlayerState ? &s_lastValidPlayerState : NULL);
     char snapBuf[128];
@@ -1723,14 +1737,14 @@ static void TransitionState(BotState nextState, const char* reason, const Player
         s_enteredHunting = false;
         s_wasInHunting = false;
     }
+    if (oldState == BotState::RETURNING) {
+        s_loggedReturn = false;
+    }
     if (oldState == BotState::DEAD) {
         s_enteredDeadState = false;
         s_loggedDead = false;
     }
-
-    if (oldHandler) {
-        oldHandler->OnExit();
-    }
+    s_partialDeadSeenTime = 0;
 
     g_State.store((int)nextState);
 
@@ -1746,18 +1760,47 @@ static void TransitionState(BotState nextState, const char* reason, const Player
 
     switch (nextState) {
         case BotState::RETURNING:
-            Log("狀態機", "  └- RETURNING: 交由 ReturningHandler 發送起點卡");
+            s_returnStartTime = 0;
+            s_returnCardSent = false;
+            s_loggedReturn = false;
+            s_returnSourceValid = false;
+            if (snapshot) {
+                s_returnSourceMapId = snapshot->mapId;
+                s_returnSourceX = snapshot->x;
+                s_returnSourceZ = snapshot->z;
+                s_returnSourceValid = true;
+            }
+            Log("狀態機", "  └- RETURNING: 重置回城計時器和卡片發送標記");
             break;
         case BotState::TOWN_SUPPLY:
-            Log("狀態機", "  └- TOWN_SUPPLY: 啟動視覺補給");
+            SupplyForceReset();
+            // Bug 4 修復：如果來自 DEAD，先確認位置
+            if (oldState == BotState::DEAD) {
+                s_returnCardSent = false;
+                s_returnStartTime = 0;
+                Log("狀態機", "  └- TOWN_SUPPLY: 來自 DEAD，重置回城卡片狀態");
+            }
+            Log("狀態機", "  └- TOWN_SUPPLY: 重置補給 FSM 狀態");
             break;
         case BotState::BACK_TO_FIELD:
-            Log("狀態機", "  └- BACK_TO_FIELD: 交由 BackToFieldHandler 發送前點卡");
+            s_backToFieldStartTime = now;
+            s_backToFieldCardSent = 0;
+            s_backToFieldSourceValid = false;
+            s_backToFieldSourceWasTown = false;
+            if (snapshot) {
+                s_backToFieldSourceMapId = snapshot->mapId;
+                s_backToFieldSourceX = snapshot->x;
+                s_backToFieldSourceZ = snapshot->z;
+                s_backToFieldSourceValid = true;
+                s_backToFieldSourceWasTown = IsTownMap(snapshot->mapId);
+            }
+            Log("狀態機", "  └- BACK_TO_FIELD: 開始返回野外計時");
             break;
         case BotState::HUNTING:
             ResetCombatRuntimeState();
             s_enteredHunting = false;
             s_wasInHunting = false;
+            s_supplyPhase = 0;  // 防止非正常退出 TOWN_SUPPLY 時的狀態污染
             Log("狀態機", "  └- HUNTING: 重置戰鬥意向與技能輪替");
             break;
         case BotState::DEAD:
@@ -1770,26 +1813,27 @@ static void TransitionState(BotState nextState, const char* reason, const Player
             Log("狀態機", "  └- DEAD: 記錄死亡時間，重置復活狀態");
             break;
         case BotState::IDLE:
-            VisualSupply::Reset();
+            SupplyForceReset();
             ResetCombatRuntimeState();
+            s_returnStartTime = 0;
+            s_returnCardSent = false;
+            s_backToFieldStartTime = 0;
+            s_backToFieldCardSent = 0;
             s_deadRecoverySeenTime = 0;
             s_reviveClicked = false;
             s_reviveRetryCount = 0;
+            s_returnSourceValid = false;
+            s_backToFieldSourceValid = false;
+            s_backToFieldSourceWasTown = false;
+            s_supplyPhase = 0;  // 確保非正常退出時狀態乾淨
             Log("狀態機", "  └- IDLE: 清空戰鬥/補給殘留狀態");
             break;
         case BotState::PAUSED:
             s_pausedPreviousState = oldState;  // 記住 PAUSED 之前的狀態
             Logf("狀態機", "  └- PAUSED: 轉轉樂安全碼已暫停（之前: %s）", GetStateName(s_pausedPreviousState));
             break;
-        case BotState::RECOVERY:
-            InitRecoverySystem();
-            Log("狀態機", "  └- RECOVERY: VLM 驅動脫困系統已啟動");
-            break;
         default:
             break;
-    }
-    if (nextHandler) {
-        nextHandler->OnEnter(snapshot);
     }
     LeaveCriticalSection(&s_stateTransitionCs);
 }
@@ -1816,86 +1860,110 @@ void StopBot() {
 void ForceStopBot() {
     StopBot();
 }
-void RequestRecovery(const char* reason) {
-    BotState cur = (BotState)g_State.load();
-    if (cur == BotState::RECOVERY || cur == BotState::EMERGENCY_STOP) {
-        Logf("Recovery", "RequestRecovery: 已在 %s，忽略", GetStateName(cur));
-        return;
-    }
-    Logf("Recovery", "[RequestRecovery] 請求進入 Recovery: %s", reason ? reason : "未知原因");
-    TransitionState(BotState::RECOVERY, "RequestRecovery", NULL);
-}
-
-// === 新版啟動邏輯（強制相對模式 + 避免卡死）===
 void ToggleBotActive() {
-    if (g_cfg.active.load()) {
+    bool wasActive = g_cfg.active.load();
+    UIAddLog("[Bot] 切換啟動: auth=%d active=%d state=%s",
+        IsLicenseValid() ? 1 : 0,
+        wasActive ? 1 : 0,
+        GetStateName((BotState)g_State.load()));
+    if (!IsLicenseValid()) {
         g_cfg.active.store(false);
-        TransitionState(BotState::IDLE, "UserStop", NULL);
-        UIAddLog("[Bot] 已停止 (F11)");
+        Log("認證", "❌ 卡密未驗證，拒絕啟動 Bot");
+        UIAddLog("[Bot] 卡密未驗證，無法啟動");
+        if (GetBotState() != BotState::IDLE) {
+            TransitionState(BotState::IDLE, "AuthRequired", NULL);
+        }
         return;
     }
+    if (g_State.load() == (int)BotState::PAUSED) {
+        g_cfg.active.store(true);
+        BotState prevState = s_pausedPreviousState;
+        // 恢復到 PAUSED 之前的狀態，而不是硬編碼 HUNTING
+        if (prevState == BotState::IDLE || prevState == BotState::HUNTING) {
+            TransitionState(prevState, "ResumeFromPaused", NULL);
+        } else {
+            // 如果之前狀態不對，回 IDLE
+            TransitionState(BotState::IDLE, "ResumeFromPausedInvalid", NULL);
+        }
+        Logf("防偵測", "✓ F11 已恢復 bot（從 PAUSED 恢復到 %s）", GetStateName(prevState));
+        UIAddLog("[Bot] F11 pressed - resuming bot from PAUSED to %s", GetStateName(prevState));
+        return;
+    }
+    g_cfg.active.store(!wasActive);
+    if (!wasActive) {
+        if (g_State.load() == (int)BotState::IDLE) {
+            // ── BUG-002 FIX: 非阻塞式啟動，允許 UI 響應 ──
+            // 先檢查遊戲是否已就緒
+            GameHandle gh = GetGameHandle();
+            bool needAttach = !gh.hProcess || !gh.attached || !gh.baseAddr;
 
-    // 強制使用純相對座標模式（不管記憶體讀不讀得到）
-    SetRelativeOnlyCombatMode(true, "使用者強制啟動");
+            if (needAttach) {
+                // 嘗試一次附加
+                GameHandle attachGh;
+                memset(&attachGh, 0, sizeof(attachGh));
+                if (FindGameProcess(&attachGh)) {
+                    SetGameHandle(&attachGh);
+                    gh = GetGameHandle();
+                    Logf("狀態機", "✅ FindGameProcess 回傳成功: pid=%u hProcess=%p baseAddr=0x%08X attached=%d",
+                        attachGh.pid, attachGh.hProcess, attachGh.baseAddr, attachGh.attached);
+                } else {
+                    // 遊戲未啟動，非阻塞等待
+                    UIAddLog("[Bot] 等待遊戲啟動...");
+                    Log("狀態機", "⚠️ 遊戲未啟動，等待中...");
+                    // 讓 BotTick 處理後續重試，而不是在這裡阻塞
+                }
+            }
 
-    Log("狀態機", "========================================");
-    Log("狀態機", "[開始] 強制純相對座標模式啟動（忽略記憶體讀取錯誤）");
-    Log("狀態機", "========================================");
+            // 嘗試讀取玩家資料
+            PlayerState startState = {};
+            char startReason[160] = {};
+            PlayerStateReadStatus startStatus = PlayerStateReadStatus::READ_FAILED;
 
-    g_cfg.active.store(true);
+            if (gh.hProcess && gh.attached && gh.baseAddr) {
+                startStatus = ReadPlayerStateDetailed(&gh, &startState, startReason, sizeof(startReason));
+                if (startStatus == PlayerStateReadStatus::OK) {
+                    Logf("狀態機", "✅ 玩家資料讀取成功: HP=%d/%d MP=%d/%d MAP=%d",
+                        startState.hp, startState.maxHp, startState.mp, startState.maxMp, startState.mapId);
+                } else {
+                    Logf("狀態機", "⚠️ 讀取玩家資料失敗: %s", startReason);
+                }
+            }
 
-    // 直接進入 HUNTING，不走 TOWN_SUPPLY 判斷
-    TransitionState(BotState::HUNTING, "ForceRelativeStart", NULL);
-    UIAddLog("[Bot] 已開始（純相對座標模式）(F11)");
+            // 如果玩家資料不可用，檢查是否可以純相對座標模式運行
+            if (startStatus != PlayerStateReadStatus::OK && !CanUseRelativeOnlyCombat(&gh)) {
+                g_cfg.active.store(false);
+                Logf("狀態機", "❌ 玩家資料不可用: %s", startReason[0] ? startReason : "未知原因");
+                UIAddLog("[Bot] 啟動失敗：玩家資料不可用");
+                return;
+            }
+
+            // 初始化技能冷卻
+            DWORD now = GetTickCount();
+            for (int i = 0; i < BotConfig::MAX_SKILLS; i++) {
+                s_skillLastTime[i] = now - 500;
+            }
+            g_cfg.currentSkillIndex.store(0);
+
+            Log("狀態機", "========================================");
+            if (startStatus == PlayerStateReadStatus::OK) {
+                Log("狀態機", "[開始] Bot 開始狩獵！");
+                SetRelativeOnlyCombatMode(false, "啟動前讀值正常");
+            } else {
+                Logf("狀態機", "[開始] 純相對座標模式啟動: %s", startReason[0] ? startReason : "遊戲未就緒");
+                SetRelativeOnlyCombatMode(true, startReason);
+            }
+            Log("狀態機", "========================================");
+
+            TransitionState(BotState::HUNTING, "ToggleBotActiveStart", NULL);
+        }
+        UIAddLog("[Bot] 已開始狩獵 (F11)");
+    } else {
+        ForceStopBot();
+        UIAddLog("[Bot] 已暫停狩獵 (F11)");
+    }
 }
 void ResetBotTarget() {
     ResetCombatRuntimeState();
-}
-// ============================================================
-// 意圖模式控制（F1/F2 切換）
-// ============================================================
-IntentMode GetIntentMode() {
-    return g_cfg.intentMode.load();
-}
-void SetIntentMode(IntentMode mode) {
-    g_cfg.intentMode.store(mode);
-    const char* modeName = GetIntentModeName(mode);
-    Logf("意圖", "切換到 %s 模式", modeName);
-    UIAddLog("[意圖] %s 模式", modeName);
-}
-const char* GetIntentModeName(IntentMode mode) {
-    return (mode == IntentMode::COMBAT) ? "攻擊" : "輔助";
-}
-void CycleCombatIntent() {
-    DWORD now = GetTickCount();
-    DWORD interval = (DWORD)g_cfg.intentCycleIntervalMs.load();
-    static DWORD s_lastCycleTime = 0;
-    if (now - s_lastCycleTime < interval) return;
-    s_lastCycleTime = now;
-
-    g_cfg.intentMode.store(IntentMode::COMBAT);
-    int nextIntent = ((int)s_combatIntent.load() + 1) % 3;
-    s_combatIntent.store(nextIntent);
-
-    const char* intentNames[] = {"SEEKING", "ENGAGING", "LOOTING"};
-    Logf("意圖", "[F1] 戰鬥意向: %s", intentNames[nextIntent]);
-    UIAddLog("[F1] 戰鬥意向: %s", intentNames[nextIntent]);
-}
-void CycleSupportSkill(int delta) {
-    g_cfg.intentMode.store(IntentMode::SUPPORT);
-    int current = g_cfg.selectedSupportSkill.load();
-    int newSkill = (current + delta + 10) % 10;
-    g_cfg.selectedSupportSkill.store(newSkill);
-    Logf("意圖", "[F2] 選擇輔助技能 %d", newSkill + 1);
-    UIAddLog("[F2] 輔助技能: %d", newSkill + 1);
-}
-void CycleCombatSkill(int delta) {
-    g_cfg.intentMode.store(IntentMode::COMBAT);
-    int current = g_cfg.selectedCombatSkill.load();
-    int newSkill = (current + delta + 10) % 10;
-    g_cfg.selectedCombatSkill.store(newSkill);
-    Logf("意圖", "[數字鍵] 選擇攻擊技能 %d", newSkill + 1);
-    UIAddLog("[數字鍵] 攻擊技能: %d", newSkill + 1);
 }
 int GetMonsterCount(GameHandle* gh) {
     if (!IsLicenseValid()) return 0;
@@ -1929,112 +1997,80 @@ void SetMoveTarget(float x, float z) {
     LeaveCriticalSection(&g_cfg.cs_protected);
 }
 // ============================================================
-// 復活點擊邏輯（統一的復活函式）
+// 切換技能欄位
 // ============================================================
-static bool DoReviveClick(HWND hWnd, const char* imgName, CalibIndex idx, int fx, int fz) {
-    if (!hWnd || !IsWindow(hWnd)) return false;
-
-    Coords::Point clickPt = ResolveReviveClickPoint(idx, fx, fz);
-    const char* source = CoordCalibrator::Instance().IsCalibrated(idx) ? "校正" : "fallback";
-
-    // 截圖找圖已禁用，直接使用校正/fallback 座標
-    // （視覺模式已禁用，ScreenshotAssist 為空殼）
-    //     GameHandle tmpGh = GetGameHandle();
-    //     if (tmpGh.hWnd) {
-    //         char picPath[MAX_PATH];
-    //         snprintf(picPath, sizeof(picPath), "%s%s", DM_VISUAL_IMAGE_PATH, imgName);
-    //         int dmX = -1, dmY = -1;
-    //         bool dmFound = DMWrapper::g_dm.FindPic(0, 0, 1024, 768, picPath, 0.8f, 0, &dmX, &dmY);
-    //         if (dmFound && dmX >= 0 && dmY >= 0) {
-    //             Logf("復活", "[DM找圖] %s found at (%d,%d)", imgName, dmX, dmY);
-    //             clickPt = Coords::Point(dmX, dmY);
-    //             source = "DM找圖";
-    //         } else {
-    //             Logf("復活", "[DM找圖] %s not found (ret=%d x=%d y=%d)",
-    //                 imgName, dmFound ? 1 : 0, dmX, dmY);
-    //         }
-    //     }
-    // }
-
-    // 使用預設座標或找到的座標點擊
-    Logf("復活", "[%s] click=(%d,%d)", source, clickPt.x, clickPt.z);
-    return ClickRelativeWithSendInput(hWnd, clickPt.x, clickPt.z, source);
+static void SwitchBar(HWND hWnd, BYTE barKey) {
+    if (!hWnd) return;
+    if (s_curBar == barKey) return;
+    SendKeyDirect(hWnd, barKey);
+    SleepJitter(80);
+    s_curBar = (char)barKey;
+    Logf("技能", "[欄位] 切換%s欄 (%s)",
+        barKey == VK_F1 ? "攻擊" : "輔助",
+        barKey == VK_F1 ? "F1" : "F2");
 }
-
-// 公開的復活執行函式（供 FSM DeadHandler 呼叫）
-bool ExecuteRevive(HWND hWnd) {
-    int mode = g_cfg.revive_mode.load();
-    bool success = false;
-
-    switch (mode) {
-        case 0: { // 歸魂珠優先
-            CalibIndex idx = CalibIndex::REVIVE_SOUL_PEARL;
-            success = DoReviveClick(hWnd, "歸魂珠.png", idx,
-                Coords::歸魂珠復活.x, Coords::歸魂珠復活.z);
-            if (!success) {
-                // fallback 到原地復活
-                success = DoReviveClick(hWnd, "原地.png", CalibIndex::REVIVE原地,
-                    Coords::復活按鈕.x, Coords::復活按鈕.z);
-            }
-            break;
+// ============================================================
+// 喝水邏輯
+// ============================================================
+static void DoPotionTick(HWND hWnd, const PlayerState& st) {
+    static int callCount = 0;
+    static DWORD lastCallLog = 0;
+    DWORD now = GetTickCount();
+    callCount++;
+    if (now - lastCallLog > 5000) {
+        Logf("喝水", "[DoPotionTick 被調用 %d 次]", callCount);
+        lastCallLog = now;
+    }
+    if (!hWnd) {
+        static DWORD lastErrLog = 0;
+        if (now - lastErrLog > 5000) {
+            Log("喝水", "❌ HWND 為 NULL，無法發送按鍵！");
+            lastErrLog = now;
         }
-        case 1: // 原地復活
-            success = DoReviveClick(hWnd, "原地.png", CalibIndex::REVIVE原地,
-                Coords::復活按鈕.x, Coords::復活按鈕.z);
-            break;
-        case 2: // 基本復活
-            success = DoReviveClick(hWnd, "基本.png", CalibIndex::REVIVE_基本,
-                Coords::基本復活.x, Coords::基本復活.z);
-            break;
-    }
-
-    Logf("復活", "[ExecuteRevive] mode=%d success=%d", mode, success);
-    return success;
-}
-
-static void ResetDeadRecoveryRuntime() {
-    s_enteredDeadState = false;
-    s_deathStartTime = 0;
-    s_deadRecoverySeenTime = 0;
-    s_reviveRetryCount = 0;
-    s_reviveClicked = false;
-    s_loggedDead = false;
-    if (DMVisual::IsInited()) {
-        DMVisual::ResetDeadState();
-    }
-}
-
-static void FinishDeadRecovery(GameHandle* gh, const PlayerState& st, const char* reason) {
-    (void)gh;
-    int mode = g_cfg.revive_mode.load();
-    bool autoSupply = g_cfg.auto_supply.load();
-    bool inTown = IsTownMap(st.mapId);
-    bool usablePos = HasUsableWorldPos(st.x, st.z);
-    bool likelyField = !inTown && (mode == 0 || mode == 1 || usablePos || !IsReliableTownMapId(st.mapId));
-
-    if (!autoSupply) {
-        Logf("狀態機", "[DEAD -> HUNTING] HP恢復，自動補給關閉 mode=%d Map=%d x=%.1f z=%.1f",
-            mode, st.mapId, st.x, st.z);
-        TransitionState(BotState::HUNTING, reason ? reason : "DeadRecoveredNoSupply", &st);
-        ResetDeadRecoveryRuntime();
         return;
     }
-
-    if (likelyField && mode != 2) {
-        Logf("狀態機", "[DEAD -> RETURNING] HP恢復，先回城補給 mode=%d Map=%d x=%.1f z=%.1f",
-            mode, st.mapId, st.x, st.z);
-        TransitionState(BotState::RETURNING, reason ? reason : "DeadRecoveredNeedReturn", &st);
-        ResetDeadRecoveryRuntime();
-        return;
+    int hpPct = st.maxHp > 0 ? (st.hp * 100) / st.maxHp : 100;
+    int mpPct = st.maxMp > 0 ? (st.mp * 100) / st.maxMp : 100;
+    int spPct = st.maxSp > 0 ? (st.sp * 100) / st.maxSp : 100;
+    int hpTh = g_cfg.hp_potion_pct.load();
+    int mpTh = g_cfg.mp_potion_pct.load();
+    int spTh = g_cfg.sp_potion_pct.load();
+    BYTE hpKey = g_cfg.key_hp_potion;
+    BYTE mpKey = g_cfg.key_mp_potion;
+    BYTE spKey = g_cfg.key_sp_potion;
+    static DWORD lastDiagLog = 0;
+    if (now - lastDiagLog > 10000) {
+        Logf("喝水", "狀態: HP=%d/%d=%d%%(閾值<%d%%) MP=%d/%d=%d%%(閾值<%d%%) SP=%d/%d=%d%%(閾值<%d%%)",
+            st.hp, st.maxHp, hpPct, hpTh,
+            st.mp, st.maxMp, mpPct, mpTh,
+            st.sp, st.maxSp, spPct, spTh);
+        lastDiagLog = now;
     }
+    if (hpPct < hpTh) {
+        if (hpKey != 0) {
+            SendKeyInputFocused(hpKey, hWnd);
+        }
+    }
+    if (mpPct < mpTh) {
+        if (mpKey != 0) {
+            SendKeyInputFocused(mpKey, hWnd);
+        }
+    }
+    if (spPct < spTh) {
+        if (spKey != 0) {
+            SendKeyInputFocused(spKey, hWnd);
+        }
+    }
+}
 
-    const char* townNames[] = { "聖門", "商洞", "玄巖", "鳳凰" };
-    int townIdx = g_cfg.town_index.load();
-    Logf("狀態機", "[DEAD -> TOWN_SUPPLY] HP恢復，進入補給 mode=%d town=%d/%s Map=%d x=%.1f z=%.1f",
-        mode, townIdx, (townIdx >= 0 && townIdx <= 3) ? townNames[townIdx] : "?",
-        st.mapId, st.x, st.z);
-    TransitionState(BotState::TOWN_SUPPLY, reason ? reason : "DeadRecoveredSupply", &st);
-    ResetDeadRecoveryRuntime();
+// ============================================================
+// Pet feeding - DISABLED (Coords::食料/寵物卡 not defined)
+// ============================================================
+static void DoPetFeedTick(HWND hWnd) {
+    (void)hWnd;
+    // if (!g_cfg.feed_pet.load()) return;
+    // if (!hWnd) return;
+    // ... disabled
 }
 
 // ============================================================
@@ -2110,68 +2146,1972 @@ bool CheckGameTimeBackToField(GameHandle* gh) {
     return false;
 }
 
-static bool ClickRelativeWithSendInput(HWND hWnd, int rx, int rz, const char* reason) {
-    if (!hWnd || !IsWindow(hWnd)) return false;
-
-    // 使用統一 CoordConv 命名空間（0-1000 標準化座標）
-    int cx, cy;
-    int clientW, clientH;
-    if (!CoordConv::GetClientRect(hWnd, &clientW, &clientH)) return false;
-    CoordConv::RelToClient(rx, rz, &cx, &cy, clientW, clientH);
-
-    // Clamp to client area
-    if (cx < 0) cx = 0;
-    if (cx >= clientW) cx = clientW - 1;
-    if (cy < 0) cy = 0;
-    if (cy >= clientH) cy = clientH - 1;
-
-    int sx, sy;
-    if (!CoordConv::ClientToScreenPt(hWnd, cx, cy, &sx, &sy)) return false;
-
-    // 激活窗口（DirectX 必須）- 已禁用以避免黑屏
-    // 使用 PostMessage 方式無需 SetForegroundWindow
-
-    // 移動滑鼠到目標位置
-    SetCursorPos(sx, sy);
-    Sleep(10);
-
-    // 點擊
-    INPUT inputs[2] = {};
-    inputs[0].type = INPUT_MOUSE;
-    inputs[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
-    inputs[1].type = INPUT_MOUSE;
-    inputs[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
-    UINT sent = SendInput(2, inputs, sizeof(INPUT));
-
-    Logf("復活", "[SendInput] 點擊%s rel=(%d,%d) screen=(%d,%d) sent=%u",
-        reason && reason[0] ? reason : "",
-        rx, rz, sx, sy, sent);
-    return sent == 2;
+// ============================================================
+// 失敗目標管理
+// ============================================================
+static void AddFailedTarget(DWORD targetId) {
+    DWORD now = GetTickCount();
+    for (int i = 0; i < s_failedCount; i++) {
+        if (s_failedTargets[i].id == targetId) {
+            s_failedTargets[i].failTime = now;
+            return;
+        }
+    }
+    if (s_failedCount < MAX_FAILED_TARGETS) {
+        s_failedTargets[s_failedCount].id = targetId;
+        s_failedTargets[s_failedCount].failTime = now;
+        s_failedCount++;
+    } else {
+        int oldest = 0;
+        for (int i = 1; i < MAX_FAILED_TARGETS; i++) {
+            if (s_failedTargets[i].failTime < s_failedTargets[oldest].failTime) oldest = i;
+        }
+        s_failedTargets[oldest].id = targetId;
+        s_failedTargets[oldest].failTime = now;
+    }
 }
-static Coords::Point ResolveReviveClickPoint(CalibIndex idx, int fx, int fz) {
-    CoordCalibrator& calib = CoordCalibrator::Instance();
-    if (calib.IsCalibrated(idx)) {
-        Coords::Point p(calib.GetX(idx), calib.GetZ(idx));
-        Logf("復活", "[座標] 使用GUI校正 %s click=(%d,%d)",
-            CoordCalibrator::Instance().GetLabel(idx), p.x, p.z);
-        return p;
+static bool IsFailedTarget(DWORD targetId) {
+    DWORD now = GetTickCount();
+    // 每 60 秒清理一次過期項目（使用 s_lastFailedPurge 避免每次都遍歷）
+    if (now - s_lastFailedPurge > 60000) {
+        for (int i = s_failedCount - 1; i >= 0; i--) {
+            if (now - s_failedTargets[i].failTime > FAILED_TARGET_COOLDOWN) {
+                for (int j = i; j < s_failedCount - 1; j++) s_failedTargets[j] = s_failedTargets[j+1];
+                s_failedCount--;
+            }
+        }
+        s_lastFailedPurge = now;
+    }
+    for (int i = 0; i < s_failedCount; i++) {
+        if (s_failedTargets[i].id == targetId) return true;
+    }
+    return false;
+}
+static void ClearFailedTarget(DWORD targetId) {
+    for (int i = 0; i < s_failedCount; i++) {
+        if (s_failedTargets[i].id == targetId) {
+            for (int j = i; j < s_failedCount - 1; j++) s_failedTargets[j] = s_failedTargets[j+1];
+            s_failedCount--;
+            return;
+        }
+    }
+}
+// ============================================================
+// 放棄目標
+// ============================================================
+static void GiveUpTarget(GameHandle* gh, const char* reason) {
+    DWORD now = GetTickCount();
+    Logf("戰鬥", "放棄目標 ID=0x%08X 原因: %s (擊殺:%d)",
+        s_currentTargetId, reason, s_killCount);
+    AddFailedTarget(s_currentTargetId);
+    s_currentTargetId = 0;
+    if (now - s_lastIntentChange > 100) {
+        s_combatIntent = CombatIntent::SEEKING;
+        s_lastIntentChange = now;
+    }
+    s_engageStartTime = 0;
+    if (gh && gh->hProcess && gh->baseAddr) {
+        SafeNtWPM(gh->hProcess, gh->baseAddr + OffsetConfig::TargetID(), (DWORD)0xFFFFFFFF);
+        SafeNtWPM(gh->hProcess, gh->baseAddr + OffsetConfig::TargetHasTarget(), (int)0);
+    }
+    // ── 清除遊戲內鎖定框（按 ESC 取消目標瞄準）──
+    if (gh && gh->hWnd) {
+        SendKeyDirect(gh->hWnd, VK_ESCAPE);
+        Sleep(30);
+    }
+}
+static bool RunPacketCombatIntentTick(GameHandle* gh, const PlayerState& st) {
+    if (!gh || !gh->hProcess || !gh->baseAddr) return false;
+    DWORD now = GetTickCount();
+    if (!IsAttackSenderConnected()) {
+        static DWORD s_lastConnectTry = 0;
+        if (now - s_lastConnectTry > 5000) {
+            TryAttackSenderConnect(50);
+            s_lastConnectTry = now;
+        }
+        if (!IsAttackSenderConnected()) return false;
+    }
+    if (now - s_playerServerIdTime > 10000 || s_playerServerId == 0) {
+        DWORD sid = 0;
+        if (RefreshPlayerServerId(gh, st, &sid)) {
+            s_playerServerId = sid;
+            s_playerServerIdTime = now;
+            DWORD mid = 0, low = 0;
+            if (SplitServerId(s_playerServerId, &mid, &low)) {
+                SetPlayerID(mid, low);
+            }
+        }
+    }
+    if (s_playerServerId == 0) return false;
+
+    if (s_combatIntent == CombatIntent::LOOTING) {
+        if (s_targetLostTime == 0) {
+            s_targetLostTime = now;
+            return true;
+        }
+        if (now - s_targetLostTime >= s_lootDelay) {
+            s_targetLostTime = 0;
+            s_currentTargetId = 0;
+            if (now - s_lastIntentChange > 100) {
+                s_combatIntent = CombatIntent::SEEKING;
+                s_lastIntentChange = now;
+            }
+        }
+        return true;
     }
 
-    // 使用傳入的預設座標（來自 coords.h）
-    return Coords::Point(fx, fz);
+    if (s_combatIntent == CombatIntent::SEEKING) {
+        Entity e;
+        if (!FindNearestMonster(gh, &e)) return true;
+        if (e.id == 0 || e.id == 0xFFFFFFFF) return true;
+        if (IsFailedTarget(e.id)) return true;
+        s_currentTargetId = e.id;
+        s_engageStartTime = now;
+        s_hpCheckTime = now;
+        s_lastTargetHp = (DWORD)e.hp;
+        s_targetLockTime = now;
+        if (gh->hProcess && gh->baseAddr) {
+            SafeNtWPM(gh->hProcess, gh->baseAddr + OffsetConfig::TargetID(), (DWORD)e.id);
+            SafeNtWPM(gh->hProcess, gh->baseAddr + OffsetConfig::TargetHasTarget(), (int)1);
+        }
+        if (now - s_lastIntentChange > 100) {
+            s_combatIntent = CombatIntent::ENGAGING;
+            s_lastIntentChange = now;
+        }
+        return true;
+    }
+
+    if (s_combatIntent != CombatIntent::ENGAGING) return true;
+    if (s_currentTargetId == 0) {
+        if (now - s_lastIntentChange > 100) {
+            s_combatIntent = CombatIntent::SEEKING;
+            s_lastIntentChange = now;
+        }
+        return true;
+    }
+
+    Entity e;
+    if (!GetMonsterById(gh, s_currentTargetId, &e)) {
+        GiveUpTarget(gh, "TargetNotFound");
+        return true;
+    }
+    if (e.isDead || e.hp <= 0) {
+        s_killCount++;
+        ClearFailedTarget(s_currentTargetId);
+        s_targetLostTime = now;
+        if (now - s_lastIntentChange > 100) {
+            s_combatIntent = CombatIntent::LOOTING;
+            s_lastIntentChange = now;
+        }
+        return true;
+    }
+
+    DWORD engageElapsed = s_engageStartTime ? (now - s_engageStartTime) : 0;
+    if (engageElapsed > ENGAGE_HARD_TIMEOUT) {
+        GiveUpTarget(gh, "EngageHardTimeout");
+        return true;
+    }
+
+    if ((DWORD)e.hp < s_lastTargetHp) {
+        s_lastTargetHp = (DWORD)e.hp;
+        s_hpCheckTime = now;
+    } else {
+        DWORD noDropElapsed = s_hpCheckTime ? (now - s_hpCheckTime) : 0;
+        if (noDropElapsed > ENGAGE_HP_TIMEOUT) {
+            GiveUpTarget(gh, "TargetHpNotDropping");
+            return true;
+        }
+    }
+
+    DWORD interval = (DWORD)g_cfg.attackSkillInterval.load();
+    if (interval < 10) interval = 10;
+    if (now - s_lastCombatTick < interval) return true;
+    s_lastCombatTick = now;
+
+    DWORD attackerMid = 0, attackerSid = 0;
+    DWORD targetMid = 0, targetSid = 0;
+    if (!SplitServerId(s_playerServerId, &attackerMid, &attackerSid)) return true;
+    if (!SplitServerId(s_currentTargetId, &targetMid, &targetSid)) return true;
+
+    bool ok = SendAttackPacket(attackerMid, attackerSid, targetMid, targetSid);
+    return ok;
+}
+// ============================================================
+// 輔助技能
+// ============================================================
+static void DoSupportSkill(HWND hWnd) {
+    if (!hWnd || !g_cfg.auto_support.load()) return;
+    DWORD now = GetTickCount();
+    int intervalSec = g_cfg.buffCastInterval.load();
+    if (intervalSec <= 0) intervalSec = 30;
+    if (now - g_cfg.lastBuffTime.load() < (DWORD)(intervalSec * 1000)) return;
+    int buffCount = g_cfg.buffSkillCount.load();
+    if (buffCount < 1) buffCount = 1;
+    if (buffCount > BotConfig::MAX_AUX_SKILLS) buffCount = BotConfig::MAX_AUX_SKILLS;
+    static int s_buffIndex = 0;
+    int idx = s_buffIndex % buffCount;
+    BYTE numKey = (BYTE)('1' + idx);
+    SendKeyDirect(hWnd, g_cfg.buffBarKey.load());
+    SleepJitter(60);
+    SendKeyDirect(hWnd, numKey);
+    SleepJitter(60);
+    SendKeyDirect(hWnd, g_cfg.attackBarKey.load());
+    g_cfg.lastBuffTime.store(now);
+    s_buffIndex = (idx + 1) % buffCount;
+    Logf("技能", ">>> [輔助] F2 技能 %d，%ds 後再觸發", idx + 1, intervalSec);
+}
+// ============================================================
+// TryAutoTarget - 直接視覺鎖怪（Win7~Win11 通用，跳過記憶體偏移）
+// ============================================================
+static void TryAutoTarget(HWND hWnd, GameHandle* gh) {
+    if (s_combatIntent != CombatIntent::SEEKING) return;
+    if (!gh || !hWnd) return;
+
+    // 直接使用視覺鎖怪（像素辨識血條）
+    TargetLockResult tl = {};
+    if (TargetLock_Click(hWnd, &tl)) {
+        s_currentTargetId = 0;
+        s_targetLockTime = GetTickCount();
+        s_engageStartTime = GetTickCount();
+        s_lastTargetHp = 0;
+        s_hpCheckTime = GetTickCount();
+        s_combatIntent = CombatIntent::ENGAGING;
+
+        Logf("戰鬥", "🎯 視覺鎖怪成功 (%d,%d)", tl.gamePt.x, tl.gamePt.y);
+        SleepJitter(120);
+    }
 }
 
-// BotTick 現在使用簡化的 FSM 框架
-// 舊的冗長 BotTick 已重構為各狀態 Handler
+// ============================================================
+// DoCombatTick - 視覺鎖怪 + 固定點攻擊（純座標版）
+// ============================================================
+static void DoCombatTick(HWND hWnd, GameHandle* gh) {
+    if (s_combatIntent != CombatIntent::ENGAGING) return;
+    if (!gh || !hWnd) return;
+
+    DWORD now = GetTickCount();
+    DWORD interval = (DWORD)g_cfg.attackSkillInterval.load();
+    if (interval < 10) interval = 10;
+    if (now - s_lastCombatTick < interval) return;
+    s_lastCombatTick = now;
+
+    // 每3秒嘗試重新視覺鎖怪
+    if (now - s_targetLockTime > 3000) {
+        TargetLockResult tl = {};
+        if (TargetLock_Click(hWnd, &tl)) {
+            s_targetLockTime = now;
+        } else {
+            // 找不到怪物，回到尋怪狀態
+            s_combatIntent = CombatIntent::SEEKING;
+            return;
+        }
+    }
+
+    // 攻擊
+    static int castIndex = 0;
+    int skillCount = g_cfg.attackSkillCount.load();
+    if (skillCount < 1) skillCount = 1;
+    if (skillCount > 10) skillCount = 10;
+
+    int skillIndex = castIndex % skillCount;
+    BYTE skillKey = SkillKeyFromIndex(skillIndex);
+    SendKeyDirect(hWnd, skillKey);
+    Sleep(IsWin7Platform() ? 25 : 15);
+
+    int pointIndex = castIndex % Coords::ATTACK_SCAN_COUNT;
+    ClickAttackPoint(hWnd, pointIndex);
+    castIndex = (castIndex + 1) % Coords::ATTACK_SCAN_COUNT;
+    g_cfg.currentSkillIndex.store(castIndex % skillCount);
+}
+
+static void RunRelativeOnlyCombatTick(GameHandle* gh, DWORD now) {
+    if (!gh || !gh->hWnd) return;
+
+    if (!s_enteredHunting) {
+        Log("狀態機", "========================================");
+        Log("狀態機", "[HUNTING] 進入純相對座標固定點戰鬥模式");
+        Logf("狀態機", "  └- 中心點: (%d,%d) | 掃打點數: %d",
+            ATTACK_CENTER_X, ATTACK_CENTER_Y, Coords::ATTACK_SCAN_COUNT);
+        Log("狀態機", "========================================");
+        s_combatIntent = CombatIntent::ENGAGING;
+        s_currentTargetId = 0;
+        s_curBar = -1;
+        s_relativeScanIndex = 0;
+        s_relativeSkillIndex = 0;
+        SwitchBar(gh->hWnd, g_cfg.attackBarKey.load());
+        s_enteredHunting = true;
+    }
+
+    if (g_cfg.auto_pickup.load()) {
+        DWORD pickupDelay = (DWORD)g_cfg.pickup_interval_ms.load();
+        if (pickupDelay < 200) pickupDelay = 200;
+        if (now - s_lastPickupTime > pickupDelay) {
+            s_lastPickupTime = now;
+            BYTE key = g_cfg.key_pickup;
+            SendKeyInputFocused(key, gh->hWnd);
+        }
+    }
+
+    DoSupportSkill(gh->hWnd);
+
+    DWORD interval = (DWORD)g_cfg.attackSkillInterval.load();
+    if (interval < 10) interval = 10;
+    if (now - s_lastCombatTick < interval) return;
+    s_lastCombatTick = now;
+
+    int skillCount = g_cfg.attackSkillCount.load();
+    if (skillCount < 1) skillCount = 1;
+    if (skillCount > 10) skillCount = 10;
+
+    int skillIndex = s_relativeSkillIndex % skillCount;
+    BYTE skillKey = SkillKeyFromIndex(skillIndex);
+    SendKeyDirect(gh->hWnd, skillKey);
+    Sleep(IsWin7Platform() ? 25 : 15);
+
+    int pointIndex = s_relativeScanIndex % Coords::ATTACK_SCAN_COUNT;
+    ClickAttackPoint(gh->hWnd, pointIndex);
+
+    s_relativeSkillIndex = (s_relativeSkillIndex + 1) % skillCount;
+    s_relativeScanIndex = (s_relativeScanIndex + 1) % Coords::ATTACK_SCAN_COUNT;
+    g_cfg.currentSkillIndex.store(s_relativeSkillIndex);
+
+    static int s_logCounter = 0;
+    if (++s_logCounter >= 16) {
+        const Coords::ScanPoint* scanPoints = Coords::GetAttackScanPoints();
+        const Coords::ScanPoint& pt = scanPoints[pointIndex];
+        Logf("戰鬥", "[%c] 固定點%d/%d(%d,%d)",
+            skillKey, pointIndex + 1, Coords::ATTACK_SCAN_COUNT, pt.x, pt.z);
+        s_logCounter = 0;
+    }
+    s_wasInHunting = true;
+}
+static int CountPotionSlotsInRange(const std::vector<InvSlot>& slots, int start, int end) {
+    int occupiedCount = 0;
+    for (const auto& slot : slots) {
+        if (slot.slotIdx >= start && slot.slotIdx <= end && slot.itemId != 0) {
+            occupiedCount++;
+        }
+    }
+    return occupiedCount;
+}
+static DWORD GetTransitionConfirmTimeoutMs(DWORD minDelayMs, DWORD floorMs) {
+    if (minDelayMs < floorMs) minDelayMs = floorMs;
+    DWORD timeout = minDelayMs * 4;
+    if (timeout < floorMs) timeout = floorMs;
+    if (timeout > 30000) timeout = 30000;
+    return timeout;
+}
+static bool ConfirmReturnArrival(const PlayerState& st, char* reason, size_t reasonSize) {
+    bool validPos = HasUsableWorldPos(st.x, st.z);
+    bool mapChanged = !s_returnSourceValid || st.mapId != s_returnSourceMapId;
+    bool inTown = IsTownMap(st.mapId);
+    bool townConfigured = HasTownMapConfig();
+
+    if (inTown) {
+        _snprintf_s(reason, reasonSize, _TRUNCATE, "命中城鎮 MapId=%d", st.mapId);
+        return true;
+    }
+    if (validPos && mapChanged) {
+        _snprintf_s(reason, reasonSize, _TRUNCATE, townConfigured ?
+            "Map 已變更且座標有效 (Map=%d)" :
+            "未配置 townMapIds，改用 map 變更確認 (Map=%d)", st.mapId);
+        return true;
+    }
+    _snprintf_s(reason, reasonSize, _TRUNCATE,
+        "尚未確認到城 (Map=%d, mapChanged=%d, inTown=%d)",
+        st.mapId, mapChanged ? 1 : 0, inTown ? 1 : 0);
+    return false;
+}
+static bool ConfirmBackToFieldArrival(const PlayerState& st, char* reason, size_t reasonSize) {
+    bool validPos = HasUsableWorldPos(st.x, st.z);
+    bool mapChanged = !s_backToFieldSourceValid || st.mapId != s_backToFieldSourceMapId;
+    bool inTown = IsTownMap(st.mapId);
+
+    if (s_backToFieldSourceWasTown) {
+        if (validPos && !inTown && mapChanged) {
+            _snprintf_s(reason, reasonSize, _TRUNCATE, "已離開城鎮且切換地圖 (Map=%d)", st.mapId);
+            return true;
+        }
+        _snprintf_s(reason, reasonSize, _TRUNCATE,
+            "仍未確認離開城鎮 (Map=%d, mapChanged=%d, inTown=%d)",
+            st.mapId, mapChanged ? 1 : 0, inTown ? 1 : 0);
+        return false;
+    }
+
+    if (validPos && !inTown) {
+        _snprintf_s(reason, reasonSize, _TRUNCATE,
+            mapChanged ? "野外確認完成且地圖已變更 (Map=%d)" :
+            "野外確認完成，使用有效座標恢復戰鬥 (Map=%d)",
+            st.mapId);
+        return true;
+    }
+    _snprintf_s(reason, reasonSize, _TRUNCATE,
+        "返回野外尚未確認 (Map=%d, inTown=%d)", st.mapId, inTown ? 1 : 0);
+    return false;
+}
+
+// ============================================================
+// BotTick - 主迴圈
+// ============================================================
+
+// ── 敵人接近偵測 ──────────────────────────────────────
+struct EntityPosHistory {
+    DWORD id = 0;
+    float x = 0, z = 0;
+    DWORD lastSeen = 0;
+};
+static EntityPosHistory s_entityHistory[64];
+static DWORD s_lastApproachCheck = 0;
+static bool s_approachThreatTriggered = false;  // 防止短時間重複觸發
+
+// 檢查是否有 entity 高速接近玩家，是則觸發回城
+static bool CheckApproachingThreats(GameHandle* gh, const PlayerState& st, DWORD now) {
+    if (!g_cfg.enemy_approach_detect.load()) return false;
+
+    DWORD interval = 500;  // 每 500ms 檢查一次
+    if (now - s_lastApproachCheck < interval) return false;
+    s_lastApproachCheck = now;
+
+    float speedThresh = g_cfg.enemy_approach_speed.load();
+    float distThresh = g_cfg.enemy_approach_dist.load();
+
+    std::vector<Entity> monsters;
+    ScanEntities(gh, &monsters, NULL);
+    if (monsters.empty()) return false;
+
+    bool threatFound = false;
+    for (const auto& m : monsters) {
+        if (m.dist > distThresh) continue;  // 超過偵測距離
+
+        // 在歷史中找這個 entity
+        EntityPosHistory* prev = nullptr;
+        for (int i = 0; i < 64; i++) {
+            if (s_entityHistory[i].id == m.id) { prev = &s_entityHistory[i]; break; }
+        }
+
+        if (!prev) {
+            // 新 entity，記錄下來
+            for (int i = 0; i < 64; i++) {
+                if (s_entityHistory[i].id == 0) {
+                    s_entityHistory[i].id = m.id;
+                    s_entityHistory[i].x = m.x;
+                    s_entityHistory[i].z = m.z;
+                    s_entityHistory[i].lastSeen = now;
+                    break;
+                }
+            }
+            continue;
+        }
+
+        // 計算時間差（秒）
+        float dt = (now - prev->lastSeen) / 1000.0f;
+        if (dt < 0.1f) continue;  // 間隔太短不計算
+
+        // 計算位移和速度
+        float dx = m.x - prev->x;
+        float dz = m.z - prev->z;
+        float moveSpeed = std::sqrt(dx * dx + dz * dz) / dt;
+
+        // 計算朝向玩家的徑向速度（負值=接近，正值=遠離）
+        float prevDist = std::sqrt((prev->x - st.x) * (prev->x - st.x) + (prev->z - st.z) * (prev->z - st.z));
+        float curDist = m.dist;
+        float radialSpeed = (curDist - prevDist) / dt;
+
+        // 速度足夠大且正在接近（radialSpeed < 0）
+        if (radialSpeed < -speedThresh && moveSpeed > speedThresh * 0.5f) {
+            threatFound = true;
+            if (!s_approachThreatTriggered) {
+                Logf("狀態機", "[接近威脅] ID=%d 速度=%.1f 距離=%.1f → 觸發回城！",
+                    m.id, moveSpeed, curDist);
+                s_approachThreatTriggered = true;
+            }
+            break;
+        }
+
+        // 更新歷史
+        prev->x = m.x;
+        prev->z = m.z;
+        prev->lastSeen = now;
+    }
+
+    // 清理過期歷史（5秒沒看到就移除）
+    for (int i = 0; i < 64; i++) {
+        if (s_entityHistory[i].id != 0 && now - s_entityHistory[i].lastSeen > 5000) {
+            s_entityHistory[i].id = 0;
+        }
+    }
+
+    // 威脅消失後解除鎖定（讓下次可以再觸發）
+    if (!threatFound) s_approachThreatTriggered = false;
+
+    if (threatFound && !s_approachThreatTriggered) {
+        // 有威脅但已被處理過（本輪已觸發），不再重複觸發
+        return true;
+    }
+
+    return threatFound;
+}
 void BotTick(GameHandle* gh) {
-    // 使用 FSM 簡化版本
-    // 框架會自動處理所有狀態轉換和看門狗計時器
-
-    static bool s_fsmInited = false;
-    if (!s_fsmInited) {
-        InitFSM();
-        s_fsmInited = true;
+    static bool s_platformLogged = false;
+    if (!s_platformLogged) {
+        InitPlatformDetect();
+        Logf("系統", "=== 平台檢測: %s === (輸入模式: SendInput 前景輸入)",
+            IsWin7Platform() ? "Windows 7" : "Windows 10/11");
+        s_platformLogged = true;
     }
 
-    BotTickSimplified(gh);
+    // ── 更新遊戲視窗 HWND（校正系統用）──
+    {
+        extern void SetGameHwndForCalib(HWND);
+        if (gh && gh->hWnd) SetGameHwndForCalib(gh->hWnd);
+    }
+
+    // ── HWND 失效防呆：若 gh 的 HWND 失效，嘗試重新取得 ──
+    if (gh) {
+        bool hwndValid = (gh->hWnd != NULL) && IsWindow(gh->hWnd);
+        if (!hwndValid) {
+            GameHandle tmpGh2;
+            if (FindGameProcess(&tmpGh2) && tmpGh2.hWnd) {
+                gh->hWnd = tmpGh2.hWnd;
+                gh->pid = tmpGh2.pid;
+                gh->baseAddr = tmpGh2.baseAddr;
+                gh->attached = tmpGh2.attached;
+                Log("Bot", "HWND 失效，已重新取得");
+            }
+        } else if (!gh->baseAddr || !gh->attached) {
+            // baseAddr 失效但 HWND 還活著，單獨刷新 baseAddr（每 10 秒一次）
+            static DWORD s_lastBaseAddrRefresh = 0;
+            DWORD now = GetTickCount();
+            if (now - s_lastBaseAddrRefresh > 10000) {
+                DWORD newBase = RefreshGameBaseAddress(gh);
+                if (newBase) {
+                    Logf("Bot", "✅ baseAddr 刷新成功: 0x%08X -> 0x%08X", gh->baseAddr, newBase);
+                } else {
+                    Log("Bot", "⚠️ baseAddr 刷新失敗（遊戲可能已關閉）");
+                }
+                s_lastBaseAddrRefresh = now;
+            }
+        }
+    }
+
+    // ── 遊戲視窗解析度驗證（僅首次）──
+    {
+        static bool s_resolutionChecked = false;
+        if (!s_resolutionChecked && gh && gh->hWnd) {
+            RECT rc;
+            if (GetClientRect(gh->hWnd, &rc)) {
+                int w = rc.right;
+                int h = rc.bottom;
+                if (w != 1024 || h != 768) {
+                    Logf("解析度", "⚠️ 遊戲視窗並非 1024x768（目前: %dx%d），可能影響外掛精確度", w, h);
+                } else {
+                    Logf("解析度", "✅ 遊戲視窗解析度正常 (%dx%d)", w, h);
+                }
+            }
+            s_resolutionChecked = true;
+        }
+    }
+
+    // ── 嘗試連接 NetHook 共享記憶體（每 5 秒重試一次，避免刷屏）──
+    // ✅ BUG-005 FIX: 添加節流，避免每 tick 都嘗試連線
+    static bool s_nethookConnected = false;
+    static DWORD s_lastNethookRetry = 0;
+    if (!s_nethookConnected || !NetHookShmem_IsConnected()) {
+        DWORD nowRetry = GetTickCount();
+        if (nowRetry - s_lastNethookRetry > 5000) {
+            if (NetHookShmem_Connect()) {
+                s_nethookConnected = true;
+                Log("NetHook", "✅ 已連接到 NetHook 共享記憶體");
+            } else {
+                s_nethookConnected = false;
+            }
+            s_lastNethookRetry = nowRetry;
+        }
+    }
+
+    // gh fallback - 增強版本：始終同步最新的全域句柄
+    static GameHandle s_ghFallback;
+    static DWORD s_lastGhLog = 0;
+    DWORD nowGh = GetTickCount();
+
+    // 始終嘗試獲取最新的全域句柄（即使傳入的 gh 有效）
+    GameHandle tmpGh = GetGameHandle();
+    if (tmpGh.attached && tmpGh.hProcess) {
+        s_ghFallback = tmpGh;
+        gh = &s_ghFallback;
+        if (nowGh - s_lastGhLog > 5000) {
+            Logf("Bot", "✅ gh 同步: hProcess=%p base=0x%08X hWnd=%p",
+                s_ghFallback.hProcess, s_ghFallback.baseAddr, s_ghFallback.hWnd);
+            s_lastGhLog = nowGh;
+        }
+    } else if (!gh || !gh->attached) {
+        // 沒有有效的 gh
+        static DWORD s_lastGhFailLog = 0;
+        if (nowGh - s_lastGhFailLog > 5000) {
+            Logf("Bot", "❌ gh 無效: 參數=%p 全域 attached=%d hProcess=%p",
+                gh, tmpGh.attached, tmpGh.hProcess);
+            s_lastGhFailLog = nowGh;
+        }
+    }
+
+    // ✅ BUG-004 FIX: 減少 UI 刷新頻率，降低鎖競爭（500ms → 2000ms）
+    static DWORD s_lastUiRefresh = 0;
+    if (gh && gh->attached && nowGh - s_lastUiRefresh > 2000) {
+        RefreshUiPlayerSnapshot(gh);
+        s_lastUiRefresh = nowGh;
+    }
+
+    // ── Kami 卡密驗證 ──
+    if (!IsLicenseValid()) {
+        static DWORD s_lastKamiLog = 0;
+        DWORD nowKami = GetTickCount();
+        if (nowKami - s_lastKamiLog > 5000) {
+            Log("認證", "❌ 卡密未驗證，功能已鎖定");
+            s_lastKamiLog = nowKami;
+        }
+        Sleep(1000);
+        return;
+    }
+
+    if (!g_cfg.active.load()) {
+        Sleep(100);
+        return;
+    }
+    // 背包資料先走共享記憶體 / 實體掃描，必要時回退 ScanInventory()
+    {
+        static DWORD s_lastInvCache = 0;
+        DWORD nowCache = GetTickCount();
+        if (nowCache - s_lastInvCache > 1000) {
+            CacheInventory(gh);
+            s_lastInvCache = nowCache;
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // 視覺模式（視覺辨識為主，取代記憶體讀取）
+    // ═══════════════════════════════════════════════════════════
+    if (g_cfg.use_visual_mode.load()) {
+        // ── HWND 驗證 ──
+        if (!gh || !gh->hWnd || !IsWindow(gh->hWnd)) {
+            Sleep(100);
+            return;
+        }
+
+        static DWORD s_lastVisualLog = 0;
+        DWORD nowVisual = GetTickCount();
+        if (nowVisual - s_lastVisualLog > 5000) {
+            Logf("視覺", "BotTick 視覺模式運行中, state=%d", GetBotState());
+            s_lastVisualLog = nowVisual;
+        }
+
+        BotState currentState = GetBotState();
+
+        // ── 讀取視覺玩家狀態 ──
+        VisualPlayerState vs;
+        static VisualPlayerState s_lastVs;
+        if (ReadVisualPlayerState(gh->hWnd, &vs) && vs.found) {
+            s_lastVs = vs;
+        } else {
+            // 視覺讀取失敗，降級回記憶體模式
+            static DWORD s_visualFailLog = 0;
+            if (nowVisual - s_visualFailLog > 3000) {
+                Log("視覺", "⚠️ 視覺讀取失敗，降級回記憶體模式");
+                s_visualFailLog = nowVisual;
+            }
+        }
+
+        // ── 視覺怪物掃描 ──
+        VisualMonster vMonsters[32] = {};
+        int vMonsterCount = 0;
+        DWORD scanStart = GetTickCount();
+        if (currentState == BotState::HUNTING || currentState == BotState::IDLE) {
+            vMonsterCount = ScanVisualMonsters(gh->hWnd, vMonsters, 32);
+            if (vMonsterCount > 0) {
+                // 視覺模式鎖怪
+                if (s_combatIntent == CombatIntent::SEEKING && vMonsterCount > 0) {
+                    VisualMonster* best = &vMonsters[0];  // 已按優先級排序
+                    ClickAtDirect(gh->hWnd, best->relX, best->relY);
+                    s_combatIntent = CombatIntent::ENGAGING;
+                    s_targetLockTime = nowVisual;
+                    if (nowVisual - s_lastVisualLog > 5000 || s_lastVisualLog == 0) {
+                        Logf("視覺", "🎯 視覺鎖怪成功 (%d,%d) hp=%d%%", best->relX, best->relY, best->hpPct);
+                    }
+                }
+
+                // 視覺模式攻擊
+                if (s_combatIntent == CombatIntent::ENGAGING) {
+                    if (nowVisual - s_targetLockTime > 3000) {
+                        // 3秒後重新鎖怪
+                        if (vMonsterCount > 0) {
+                            VisualMonster* best = &vMonsters[0];
+                            ClickAtDirect(gh->hWnd, best->relX, best->relY);
+                            s_targetLockTime = nowVisual;
+                        } else {
+                            s_combatIntent = CombatIntent::SEEKING;
+                        }
+                    } else {
+                        // 攻擊技能
+                        static int s_visualSkillIndex = 0;
+                        int skillCount = g_cfg.attackSkillCount.load();
+                        if (skillCount < 1) skillCount = 1;
+                        int skillIdx = s_visualSkillIndex % skillCount;
+                        BYTE skillKey = (BYTE)(VK_F1 + skillIdx);
+                        SendKeyDirect(gh->hWnd, skillKey);
+                        SleepJitter(20);
+                        // 攻擊定點
+                        static int s_visualPointIndex = 0;
+                        ClickAttackPoint(gh->hWnd, s_visualPointIndex % Coords::ATTACK_SCAN_COUNT);
+                        s_visualPointIndex++;
+                        s_visualSkillIndex++;
+                    }
+                }
+            } else {
+                // 找不到怪物，回到 SEEKING
+                if (s_combatIntent == CombatIntent::ENGAGING) {
+                    s_combatIntent = CombatIntent::SEEKING;
+                }
+            }
+        }
+
+        // ── 視覺掃描超時保護 ──
+        DWORD scanElapsed = GetTickCount() - scanStart;
+        if (scanElapsed > (DWORD)g_cfg.visual_scan_timeout_ms.load()) {
+            static DWORD s_scanTimeoutLog = 0;
+            if (nowVisual - s_scanTimeoutLog > 5000) {
+                Logf("視覺", "⚠️ 視覺掃描超時 %dms（限制 %dms），跳過此幀",
+                    scanElapsed, g_cfg.visual_scan_timeout_ms.load());
+                s_scanTimeoutLog = nowVisual;
+            }
+            Sleep(20);
+            return;
+        }
+
+        // ── 自動喝水（視覺模式）──
+        if (vs.found && (currentState == BotState::HUNTING)) {
+            if (vs.hpPct < g_cfg.hp_potion_pct.load() && vs.hpPct > 0) {
+                SendKeyDirect(gh->hWnd, g_cfg.key_hp_potion.load());
+            }
+            if (vs.mpPct < g_cfg.mp_potion_pct.load() && vs.mpPct > 0) {
+                SendKeyDirect(gh->hWnd, g_cfg.key_mp_potion.load());
+            }
+            if (vs.spPct < g_cfg.sp_potion_pct.load() && vs.spPct > 0) {
+                SendKeyDirect(gh->hWnd, g_cfg.key_sp_potion.load());
+            }
+        }
+
+        // ── 死亡檢測（視覺模式）──
+        // found=true 表示成功讀到 HP 條，hpPct<=0 才判死亡
+        // 調試日誌：顯示視覺讀取狀態
+        static DWORD s_lastVisualDeadDebug = 0;
+        if (nowVisual - s_lastVisualDeadDebug > 5000) {
+            Logf("視覺", "  └ 調試: vs.found=%d vs.hpPct=%d vs.mpPct=%d vs.spPct=%d curState=%s",
+                vs.found ? 1 : 0, vs.hpPct, vs.mpPct, vs.spPct, GetStateName(currentState));
+            s_lastVisualDeadDebug = nowVisual;
+        }
+
+        if (vs.found && vs.hpPct <= 0 && currentState == BotState::HUNTING) {
+            Log("視覺", "========================================");
+            Log("視覺", "[HUNTING -> DEAD] 視覺檢測到死亡");
+            Log("視覺", "========================================");
+            TransitionState(BotState::DEAD, "VisualHpZero", NULL);
+            Sleep(100);
+            return;
+        }
+
+        // ── 狀態機其他狀態 ──
+        if (currentState == BotState::RETURNING) {
+            if (!s_returnCardSent) {
+                SendKeyInputFocused(g_cfg.key_waypoint_start, gh->hWnd);
+                s_returnCardSent = true;
+            }
+            Sleep(100);
+            return;
+        }
+
+        if (currentState == BotState::DEAD) {
+            // 視覺模式復活 - BUG-007/008 修復：使用全局 s_deathStartTime + 超時保護
+            DWORD elapsed = nowVisual - s_deathStartTime;
+
+            // 超時保護：60秒強制退出
+            if (elapsed > 60000) {
+                Log("狀態機", "❌ [視覺DEAD] 超時 60 秒，強制退出");
+                TransitionState(BotState::IDLE, "VisualDeadTimeout60s", NULL);
+                g_cfg.active.store(false);
+                return;
+            }
+
+            // 30秒後強制回 HUNTING
+            if (elapsed > 30000) {
+                Log("狀態機", "[視覺DEAD] 30秒超時，強制回 HUNTING");
+                TransitionState(BotState::HUNTING, "VisualDeadTimeout30s", NULL);
+                return;
+            }
+
+            // 檢測 HP 是否已恢復（可能在城鎮自動復活）
+            if (vs.found && vs.hpPct > 0) {
+                if (s_deadRecoverySeenTime == 0) {
+                    s_deadRecoverySeenTime = nowVisual;
+                }
+                if (nowVisual - s_deadRecoverySeenTime < 1200) {
+                    SleepJitter(150);
+                    return;
+                }
+                Log("狀態機", "[視覺DEAD -> HUNTING] HP 已恢復");
+                TransitionState(BotState::HUNTING, "VisualDeadRecovered", NULL);
+                return;
+            }
+
+            if (g_cfg.auto_revive.load()) {
+                int reviveWait = g_cfg.revive_delay_ms.load();
+                if (elapsed < (DWORD)reviveWait) {
+                    SleepJitter(200);
+                    return;
+                }
+                if (!s_reviveClicked) {
+                    // BUG-010 修復：添加截圖輔助補救（與記憶體模式一致）
+                    int mode = g_cfg.revive_mode.load();
+
+                    // 調試：顯示 HWND 和座標
+                    HWND hWnd = gh->hWnd;
+                    int cliW = 0, cliH = 0;
+                    CoordConv::GetClientRect(hWnd, &cliW, &cliH);
+                    Coords::Point revivePt = (mode == 0) ? (Coords::歸魂珠復活)
+                                          : (mode == 1) ? (Coords::復活按鈕)
+                                          : (Coords::基本復活);
+                    int clientX = cliW > 0 ? (revivePt.x * cliW) / 1024 : 0;
+                    int clientY = cliH > 0 ? (revivePt.z * cliH) / 768 : 0;
+                    Logf("狀態機", "[視覺DEAD] 嘗試復活: mode=%d retry=%d hWnd=%p 客戶=%dx%d 遊戲=(%d,%d) → 像素=(%d,%d)",
+                        mode, s_reviveRetryCount, hWnd, cliW, cliH, revivePt.x, revivePt.z, clientX, clientY);
+
+                    auto TryReviveClick = [&](const char* imgName, CalibIndex idx, int fx, int fz) {
+                        (void)imgName;
+                        // Screenshot fallback disabled - using coord calib directly
+                        ClickAtCalib(gh->hWnd, (int)fx, (int)fz, idx);
+                    };
+
+                    if (mode == 0) {
+                        if (s_reviveRetryCount >= 4) {
+                            TryReviveClick("resurrection.png", CalibIndex::REVIVE_基本, Coords::基本復活.x, Coords::基本復活.z);
+                        } else {
+                            TryReviveClick("Soul_Returning_Pearl.png", CalibIndex::REVIVE_SOUL_PEARL, Coords::歸魂珠復活.x, Coords::歸魂珠復活.z);
+                        }
+                    } else if (mode == 1) {
+                        TryReviveClick("resurrection.png", CalibIndex::REVIVE原地, Coords::復活按鈕.x, Coords::復活按鈕.z);
+                    } else {
+                        TryReviveClick("resurrection.png", CalibIndex::REVIVE_基本, Coords::基本復活.x, Coords::基本復活.z);
+                    }
+
+                    s_reviveClicked = true;
+                    s_reviveRetryCount++;
+                    Sleep(1000);
+                } else {
+                    s_reviveClicked = false;
+                }
+            }
+            return;
+        }
+
+        if (currentState == BotState::TOWN_SUPPLY || currentState == BotState::BACK_TO_FIELD) {
+            SupplyTick(gh);
+            Sleep(50);
+            return;
+        }
+
+        if (currentState == BotState::IDLE) {
+            Sleep(100);
+            return;
+        }
+
+        // ── 自動拾取（視覺模式）──
+        if (g_cfg.auto_pickup.load() && currentState == BotState::HUNTING) {
+            static DWORD s_lastPickup = 0;
+            DWORD pickupDelay = (DWORD)g_cfg.pickup_interval_ms.load();
+            if (nowVisual - s_lastPickup > pickupDelay) {
+                s_lastPickup = nowVisual;
+                BYTE key = g_cfg.key_pickup;
+                SendKeyInputFocused(key, gh->hWnd);
+            }
+        }
+
+        // ── 輔助技能（視覺模式）──
+        if (g_cfg.buffEnabled.load() && currentState == BotState::HUNTING) {
+            DoSupportSkill(gh->hWnd);
+        }
+
+        Sleep(20);
+        return;
+    }
+    // ═══════════════════════════════════════════════════════════
+    // 原有記憶體模式（向後兼容）
+    // ═══════════════════════════════════════════════════════════
+    // 安全碼檢測
+    if (CheckSecurityCodeWindow()) {
+        Sleep(100);
+        return;
+    }
+    if (GetBotState() == BotState::PAUSED) {
+        Sleep(100);
+        return;
+    }
+    if (!gh || !gh->attached) {
+        Sleep(100);
+        return;
+    }
+    // 認證檢查已統一到上方，無需重複檢查
+    static DWORD lastTickLog = 0;
+    DWORD now = GetTickCount();
+    if (now - lastTickLog > 5000) {
+        Logf("Bot", "BotTick 正常運行中, active=%d, state=%d",
+            g_cfg.active.load(), GetBotState());
+        lastTickLog = now;
+    }
+    // ── 讀取玩家狀態（帶防呆）──
+    PlayerState st;
+    char readReason[160] = {0};
+    PlayerStateReadStatus readStatus = ReadPlayerStateDetailed(gh, &st, readReason, sizeof(readReason));
+    if (readStatus != PlayerStateReadStatus::OK) {
+        BotState curState = GetBotState();
+        PlayerState partialState = {};
+        bool hasPartialState = RefreshUiPlayerSnapshot(gh, &partialState);
+
+        // ✅ 調試：顯示 partialState 內容
+        static DWORD s_lastDebugLog = 0;
+        if (now - s_lastDebugLog > 5000) {
+            Logf("Debug", "PartialState: has=%d maxHp=%d maxMp=%d maxSp=%d hp=%d mp=%d sp=%d level=%d map=%d",
+                hasPartialState, partialState.maxHp, partialState.maxMp, partialState.maxSp,
+                partialState.hp, partialState.mp, partialState.sp, partialState.level, partialState.mapId);
+            Logf("Debug", "curState=%s auto_revive=%d", GetStateName(curState), g_cfg.auto_revive.load());
+            s_lastDebugLog = now;
+        }
+
+        if (hasPartialState) {
+            if (curState != BotState::DEAD) {
+                if (partialState.hp <= 0) {
+                    if (s_partialDeadSeenTime == 0) s_partialDeadSeenTime = now;
+                    if (now - s_partialDeadSeenTime >= 800) {
+                        Log("狀態機", "========================================");
+                        Logf("狀態機", "[%s -> DEAD] 玩家資料%s，partial HP 歸零，切入死亡處理",
+                            GetStateName(curState),
+                            readStatus == PlayerStateReadStatus::READ_FAILED ? "讀取失敗" : "無效");
+                        Log("狀態機", "========================================");
+                        TransitionState(BotState::DEAD, "HpZeroPartialStable", &partialState);
+                        s_partialDeadSeenTime = 0;
+                        Sleep(100);
+                        return;
+                    }
+                    Sleep(100);
+                    return;
+                }
+                s_partialDeadSeenTime = 0;
+            }
+
+            if (curState == BotState::DEAD && partialState.hp > 0) {
+                if (s_deadRecoverySeenTime == 0) s_deadRecoverySeenTime = now;
+                if (now - s_deadRecoverySeenTime < 1200) {
+                    Sleep(100);
+                    return;
+                }
+                BotState next = IsTownMap(partialState.mapId) ? BotState::TOWN_SUPPLY : BotState::HUNTING;
+                const char* reason = (next == BotState::TOWN_SUPPLY) ? "DeadRecoveredPartialTown" : "DeadRecoveredPartialField";
+                Log("狀態機", "========================================");
+                Logf("狀態機", "[DEAD -> %s] 玩家資料無效但 HP 已恢復 (%d/%d map=%d)",
+                    GetStateName(next), partialState.hp, partialState.maxHp, partialState.mapId);
+                Log("狀態機", "========================================");
+                TransitionState(next, reason, &partialState);
+                s_deadRecoverySeenTime = 0;
+                Sleep(100);
+                return;
+            }
+
+            if (curState == BotState::HUNTING &&
+                now - s_lastDrinkCheck >= 800) {
+                s_lastDrinkCheck = now;
+                DoPotionTick(gh ? gh->hWnd : NULL, partialState);
+            }
+        }
+
+        if (curState == BotState::HUNTING && CanUseRelativeOnlyCombat(gh)) {
+            SetRelativeOnlyCombatMode(true, readReason);
+            if (now - s_lastRelativeCombatLog > 5000) {
+                Logf("狀態機", "⚠️ 玩家資料%s，切換純相對座標戰鬥: %s",
+                    readStatus == PlayerStateReadStatus::READ_FAILED ? "讀取失敗" : "無效",
+                    readReason[0] ? readReason : GetPlayerStateReadStatusName(readStatus));
+                s_lastRelativeCombatLog = now;
+            }
+            RunRelativeOnlyCombatTick(gh, now);
+            Sleep(50);
+            return;
+        }
+        if (curState == BotState::IDLE) {
+            Sleep(100);
+            return;
+        }
+
+        // Bug 5 修復：所有失敗路徑都必須遞增計數
+        s_consecutiveReadFail++;
+        if (now - s_lastReadFailLog > 3000) {
+            Logf("狀態機", "⚠️ 玩家資料%s（第 %d 次），停留在 [%s] 狀態: %s",
+                readStatus == PlayerStateReadStatus::READ_FAILED ? "讀取失敗" : "無效",
+                s_consecutiveReadFail, GetStateName(curState),
+                readReason[0] ? readReason : GetPlayerStateReadStatusName(readStatus));
+            s_lastReadFailLog = now;
+        }
+
+        if (curState == BotState::DEAD && g_cfg.auto_revive.load()) {
+            HWND hWnd = gh && gh->hWnd ? gh->hWnd : NULL;
+            if (!hWnd) {
+                GameHandle tmpGh;
+                if (FindGameProcess(&tmpGh) && tmpGh.hWnd) {
+                    hWnd = tmpGh.hWnd;
+                    gh->hWnd = tmpGh.hWnd;
+                    gh->pid = tmpGh.pid;
+                    gh->attached = tmpGh.attached;
+                    gh->baseAddr = tmpGh.baseAddr;
+                }
+            }
+            if (!hWnd) {
+                if (now - s_lastNoHwndLog > 5000) {
+                    Log("復活", "❌ [DEAD] hWnd 無法獲取，無法復活");
+                    s_lastNoHwndLog = now;
+                }
+                Sleep(200);
+                return;
+            }
+            if (!s_reviveClicked) {
+                int mode = g_cfg.revive_mode.load();
+                Coords::Point revivePt = (mode == 0) ? Coords::歸魂珠復活
+                                      : (mode == 1) ? Coords::復活按鈕
+                                      : Coords::基本復活;
+
+                // 調試：顯示視窗大小和座標轉換
+                RECT rc = {};
+                if (GetClientRect(hWnd, &rc)) {
+                    Logf("復活", "[DEAD] 調試: mode=%d, 視窗=%dx%d, 相對座標=(%d,%d)",
+                        mode,
+                        rc.right - rc.left, rc.bottom - rc.top,
+                        revivePt.x, revivePt.z);
+                }
+
+                Logf("復活", "[DEAD] 點擊復活 mode=%d, 座標=(%d,%d), hWnd=%p",
+                    mode, revivePt.x, revivePt.z, hWnd);
+                ClickAtDirect(hWnd, revivePt.x, revivePt.z);
+                s_reviveClicked = true;
+                s_reviveRetryCount++;
+            } else {
+                s_reviveClicked = false;
+            }
+            Sleep(500);
+            return;
+        }
+
+        if (s_consecutiveReadFail >= 10) {
+            Logf("狀態機", "❌ 玩家資料連續異常 10 次，從 [%s] 強制回 IDLE", GetStateName(curState));
+            TransitionState(BotState::IDLE, "PlayerStateUnavailable", NULL);
+            g_cfg.active.store(false);
+            s_consecutiveReadFail = 0;
+        }
+        Sleep(100);
+        return;
+    }
+    s_consecutiveReadFail = 0;
+    if (IsRelativeOnlyCombatMode()) {
+        SetRelativeOnlyCombatMode(false, "玩家資料已恢復");
+    }
+
+    BotState currentState = GetBotState();
+    int hpPct = st.maxHp > 0 ? (st.hp * 100) / st.maxHp : 100;
+    int mpPct = st.maxMp > 0 ? (st.mp * 100) / st.maxMp : 100;
+    bool autoSupplyEnabled = g_cfg.auto_supply.load();
+    // ── RETURNING ──
+    if (currentState == BotState::RETURNING) {
+        if (!s_loggedReturn) {
+            Log("狀態機", "========================================");
+            Logf("狀態機", "[RETURNING] 進入回城狀態！");
+            Logf("狀態機", "  └- 地圖: MapId=%d, x=%.1f, z=%.1f", st.mapId, st.x, st.z);
+            s_loggedReturn = true;
+        }
+        if (!s_returnCardSent) {
+            BYTE waypointKey = g_cfg.key_waypoint_start;
+            SendKeyInputFocused(waypointKey, gh->hWnd);
+            s_returnCardSent = true;
+        }
+        if (s_returnStartTime == 0) s_returnStartTime = now;
+        DWORD returnElapsed = now - s_returnStartTime;
+        DWORD teleportDelay = (DWORD)g_cfg.teleport_delay_ms.load();
+        if (returnElapsed >= teleportDelay) {
+            char confirmReason[160] = {0};
+            if (ConfirmReturnArrival(st, confirmReason, sizeof(confirmReason))) {
+                Logf("狀態機", "[RETURNING -> TOWN_SUPPLY] 傳送確認成功（%dms）: %s",
+                    returnElapsed, confirmReason);
+                TransitionState(BotState::TOWN_SUPPLY, confirmReason, &st);
+                Sleep(100);
+                return;
+            }
+            DWORD confirmTimeout = GetTransitionConfirmTimeoutMs(teleportDelay, 12000);
+            if (returnElapsed >= confirmTimeout) {
+                Logf("狀態機", "❌ [RETURNING] 傳送確認超時（%dms）: %s",
+                    returnElapsed, confirmReason);
+                TransitionState(BotState::IDLE, "ReturningConfirmTimeout", &st);
+                g_cfg.active.store(false);
+                Sleep(100);
+                return;
+            }
+        }
+        Sleep(100);
+        return;
+    }
+    // ── TOWN_SUPPLY / BACK_TO_FIELD ──
+    if (currentState == BotState::TOWN_SUPPLY || currentState == BotState::BACK_TO_FIELD) {
+        SupplyTick(gh);
+        Sleep(50);
+        return;
+    }
+    // ── DEAD ──
+    if (currentState == BotState::DEAD) {
+        // ✅ 添加調試日誌確認 DEAD 狀態被觸發
+        static DWORD s_lastDeadLog = 0;
+        if (now - s_lastDeadLog > 3000) {
+            Logf("Debug", "[DEAD] st.hp=%d st.maxHp=%d elapsed=%lu auto_revive=%d",
+                st.hp, st.maxHp, now - s_deathStartTime, g_cfg.auto_revive.load());
+            s_lastDeadLog = now;
+        }
+        if (!s_enteredDeadState) {
+            Log("狀態機", "========================================");
+            Logf("狀態機", "[DEAD] 進入死亡狀態！HP=%d/%d", st.hp, st.maxHp);
+            Log("狀態機", "========================================");
+            s_enteredDeadState = true;
+            s_reviveRetryCount = 0;
+            s_reviveClicked = false;
+        }
+        DWORD elapsed = now - s_deathStartTime;
+        // DEAD 超时保护：超过 60 秒强制退出（防止复活失败时无限卡死）
+        if (elapsed > 60000) {
+            Log("狀態機", "❌ [DEAD] 超時 60 秒，強制退出");
+            TransitionState(BotState::IDLE, "DeadTimeout60s", NULL);
+            g_cfg.active.store(false);
+            return;
+        }
+        // Bug 2 修復：30秒後如果還沒復活，強制放棄並回到 HUNTING
+        if (elapsed > 30000) {
+            Log("狀態機", "[DEAD] 30秒超時，嘗試復活失敗，強制回 HUNTING");
+            TransitionState(BotState::HUNTING, "DeadTimeout30sForceRecover", NULL);
+            return;
+        }
+        if (st.hp > 0) {
+            if (s_deadRecoverySeenTime == 0) {
+                s_deadRecoverySeenTime = now;
+            }
+            if (now - s_deadRecoverySeenTime < 1200) {
+                SleepJitter(150);
+                return;
+            }
+            s_enteredDeadState = false;
+            // 檢查角色位置：如果坐標顯示在野外，需要先回城
+            bool inField = (st.x != 0.0f || st.z != 0.0f) && (st.mapId == 0 || st.mapId == -1);
+            if (inField && g_cfg.auto_revive.load()) {
+                // 坐標無效或為 0 表示可能在城鎮；坐標有效但 mapId=0 也視為可能在城鎮
+                // 如果確認在野外，需要先發回城卡
+                const char* townNames[] = { "聖門", "商洞", "玄巖", "鳳凰" };
+                int townIdx = g_cfg.town_index.load();
+                Logf("狀態機", "[DEAD] HP恢復，在野外，需要回城 town=%d/%s",
+                    townIdx, (townIdx >= 0 && townIdx <= 3) ? townNames[townIdx] : "?");
+                // 發送回城卡，進入 RETURNING 流程
+                SendKeyInputFocused(g_cfg.key_waypoint_start, gh->hWnd);
+                s_returnCardSent = true;
+                s_returnStartTime = now;
+                TransitionState(BotState::RETURNING, "DeadRecoverNeedReturn", &st);
+                s_deathStartTime = 0;
+                s_deadRecoverySeenTime = 0;
+                return;
+            }
+            // 在城鎮或無法判斷位置，直接進入 TOWN_SUPPLY
+            char reason[64] = {0};
+            const char* townNames[] = { "聖門", "商洞", "玄巖", "鳳凰" };
+            int townIdx = g_cfg.town_index.load();
+            _snprintf_s(reason, sizeof(reason), _TRUNCATE, "DeadRecoveredTown%d_%s", townIdx,
+                       (townIdx >= 0 && townIdx <= 3) ? townNames[townIdx] : "Unknown");
+            Logf("狀態機", "[DEAD -> TOWN_SUPPLY] HP恢復 (%d > 0, town=%d/%s)",
+                 st.hp, townIdx, (townIdx >= 0 && townIdx <= 3) ? townNames[townIdx] : "?");
+            TransitionState(BotState::TOWN_SUPPLY, reason, &st);
+            s_deathStartTime = 0;
+            s_deadRecoverySeenTime = 0;
+            return;
+        }
+        s_deadRecoverySeenTime = 0;
+        if (g_cfg.auto_revive.load()) {
+            int reviveWait = g_cfg.revive_delay_ms.load();
+            if (elapsed < (DWORD)reviveWait) {
+                SleepJitter(200);
+                return;
+            }
+            if (!s_reviveClicked) {
+                int mode = g_cfg.revive_mode.load();
+                Logf("狀態機", "[DEAD] 嘗試復活: mode=%d retry=%d", mode, s_reviveRetryCount);
+
+                auto TryReviveClick = [&](const char* imgName, CalibIndex idx, int fx, int fz) {
+                    (void)imgName;
+                    // Screenshot fallback disabled - using coord calib directly
+                    ClickAtCalib(gh->hWnd, (int)fx, (int)fz, idx);
+                };
+
+                if (mode == 0) {
+                    if (s_reviveRetryCount >= 4) {
+                        TryReviveClick("resurrection.png", CalibIndex::REVIVE_基本, Coords::基本復活.x, Coords::基本復活.z);
+                    } else {
+                        TryReviveClick("Soul_Returning_Pearl.png", CalibIndex::REVIVE_SOUL_PEARL, Coords::歸魂珠復活.x, Coords::歸魂珠復活.z);
+                    }
+                } else if (mode == 1) {
+                    TryReviveClick("resurrection.png", CalibIndex::REVIVE原地, Coords::復活按鈕.x, Coords::復活按鈕.z);
+                } else {
+                    TryReviveClick("resurrection.png", CalibIndex::REVIVE_基本, Coords::基本復活.x, Coords::基本復活.z);
+                }
+                s_reviveClicked = true;
+                s_reviveRetryCount++;
+                Sleep(1000);
+                return;
+            }
+            PlayerState st2;
+            if (ReadPlayerState(gh, &st2) && st2.hp > 0) {
+                s_enteredDeadState = false;
+                // 復活成功後根據設定進入對應的 TOWN_SUPPLY
+                const char* townNames[] = { "聖門", "商洞", "玄巖", "鳳凰" };
+                int townIdx = g_cfg.town_index.load();
+                Logf("狀態機", "[DEAD -> TOWN_SUPPLY] 復活成功！HP=%d town=%d/%s",
+                     st2.hp, townIdx, (townIdx >= 0 && townIdx <= 3) ? townNames[townIdx] : "?");
+                TransitionState(BotState::TOWN_SUPPLY, "ReviveSuccess", &st2);
+                s_deathStartTime = 0;
+                s_deadRecoverySeenTime = 0;
+                s_reviveRetryCount = 0;
+                s_loggedDead = false;
+                return;
+            }
+            s_reviveRetryCount++;
+            if (s_reviveRetryCount >= 20) {
+                Log("狀態機", "❌ [DEAD] 復活失敗 20 次，強制回 IDLE");
+                TransitionState(BotState::IDLE, "ReviveRetryExceeded", &st);
+                g_cfg.active.store(false);
+                s_reviveRetryCount = 0;
+                s_reviveClicked = false;
+                return;
+            }
+            s_reviveClicked = false;
+            SleepJitter(500);
+            return;
+        }
+        if (!g_cfg.auto_revive.load()) {
+            static DWORD lastLog = 0;
+            if (now - lastLog > 5000) {
+                Log("狀態機", "[DEAD] auto_revive 關閉，等待手動復活");
+                lastLog = now;
+            }
+        }
+        SleepJitter(300);
+        return;
+    }
+    if (!g_cfg.active.load() || currentState == BotState::IDLE) {
+        static DWORD lastIdleLog = 0;
+        if (now - lastIdleLog > 5000) {
+            Logf("狀態機", "[IDLE] active=%d, state=%d", g_cfg.active.load(), currentState);
+            lastIdleLog = now;
+        }
+        Sleep(100);
+        return;
+    }
+    // ── HUNTING ──
+    if (currentState == BotState::HUNTING) {
+        if (!s_enteredHunting) {
+            Log("狀態機", "========================================");
+            Logf("狀態機", "[HUNTING] 進入戰鬥狀態！");
+            Logf("狀態機", "  └- 座標: x=%.1f, z=%.1f, Map=%d", st.x, st.z, st.mapId);
+            Logf("狀態機", "  └- HP: %d/%d (%d%%), MP: %d/%d (%d%%)", st.hp, st.maxHp, hpPct, st.mp, st.maxMp, mpPct);
+            Log("狀態機", "========================================");
+            s_combatIntent = CombatIntent::SEEKING;
+            s_currentTargetId = 0;
+            s_curBar = -1;
+            SwitchBar(gh->hWnd, g_cfg.attackBarKey.load());
+            s_enteredHunting = true;
+        }
+        if (st.hp <= 0) {
+            Log("狀態機", "========================================");
+            Logf("狀態機", "[HUNTING -> DEAD] 角色死亡！HP=0");
+            Log("狀態機", "========================================");
+            TransitionState(BotState::DEAD, "HpReachedZero", &st);
+            return;
+        }
+        // ── 敵人接近偵測 ──
+        if (CheckApproachingThreats(gh, st, now)) {
+            Log("狀態機", "[HUNTING] 偵測到敵人高速接近，準備回城...");
+            SendKeyInputFocused(g_cfg.key_waypoint_start, gh->hWnd);
+            s_returnStartTime = now;
+            s_returnCardSent = true;
+            TransitionState(BotState::RETURNING, "EnemyApproach", &st);
+            Sleep(100);
+            return;
+        }
+        // ── 先補血（嘗試用 Q 救）──
+        if (now - s_lastDrinkCheck >= 800) {
+            s_lastDrinkCheck = now;
+            DoPotionTick(gh->hWnd, st);
+        }
+
+        // ── 寵物餵食 ──
+        DoPetFeedTick(gh->hWnd);
+
+        // ── 補完後再次檢查 HP ──
+        PlayerState st2;
+        if (ReadPlayerState(gh, &st2)) {
+            int hpAfterPotion = st2.maxHp > 0 ? (st2.hp * 100 / st2.maxHp) : 100;
+
+            // 如果補完還是低血 → 回城
+            if (autoSupplyEnabled && hpAfterPotion < g_cfg.hp_return_pct.load()) {
+                Logf("狀態機", "[HUNTING] HP還是低(%d%% < %d%%)，準備回城...",
+                    hpAfterPotion, g_cfg.hp_return_pct.load());
+                SendKeyInputFocused(g_cfg.key_waypoint_start, gh->hWnd);
+                s_returnStartTime = now;
+                s_returnCardSent = true;
+                TransitionState(BotState::RETURNING, "LowHpAfterPotion", &st2);
+                Sleep(100);
+                return;
+            }
+        }
+
+        std::vector<InvSlot> inventorySlots;
+        int inventoryCount = 0;
+        InventoryScanStatus inventoryStatus = InventoryScanStatus::INVALID_HANDLE;
+        bool needInventoryScan = autoSupplyEnabled &&
+            (g_cfg.inventory_return.load() || g_cfg.potion_check_enable.load());
+        if (needInventoryScan) {
+            inventoryStatus = ScanInventoryDetailed(gh, &inventorySlots, &inventoryCount);
+        }
+
+        if (autoSupplyEnabled && g_cfg.inventory_return.load()) {
+            if (IsInventoryScanUsable(inventoryStatus)) {
+                int pct = (inventoryCount * 100) / OffsetConfig::InvMaxSlots();
+                if (pct >= g_cfg.inventory_full_pct.load()) {
+                    Logf("狀態機", "[HUNTING] 背包滿了 (%d%%)，準備回城...", pct);
+                    SendKeyInputFocused(g_cfg.key_waypoint_start, gh->hWnd);
+                    s_returnStartTime = now;
+                    s_returnCardSent = true;
+                    TransitionState(BotState::RETURNING, "InventoryFull", &st);
+                    Sleep(100);
+                    return;
+                }
+            } else {
+                static DWORD s_lastInvUnknownLog = 0;
+                if (now - s_lastInvUnknownLog > 5000) {
+                    Logf("狀態機", "[HUNTING] 背包狀態未知，跳過回城判定 (%s)",
+                        GetInventoryScanStatusName(inventoryStatus));
+                    s_lastInvUnknownLog = now;
+                }
+            }
+        }
+
+        if (autoSupplyEnabled && g_cfg.potion_check_enable.load()) {
+            if (IsInventoryScanUsable(inventoryStatus)) {
+                int potionStart = g_cfg.potion_slot_start.load();
+                int potionEnd = g_cfg.potion_slot_end.load();
+                int minPotionSlots = g_cfg.min_potion_slots.load();
+                if (minPotionSlots < 1) minPotionSlots = 1;
+                int occupiedCount = CountPotionSlotsInRange(inventorySlots, potionStart, potionEnd);
+                if (occupiedCount < minPotionSlots) {
+                    Logf("狀態機", "[HUNTING] 藥水格不足 (%d < %d)，準備回城...",
+                        occupiedCount, minPotionSlots);
+                    SendKeyInputFocused(g_cfg.key_waypoint_start, gh->hWnd);
+                    s_returnStartTime = now;
+                    s_returnCardSent = true;
+                    TransitionState(BotState::RETURNING, "PotionSlotsLow", &st);
+                    Sleep(100);
+                    return;
+                } else {
+                    static DWORD s_lastPotionOkLog = 0;
+                    if (now - s_lastPotionOkLog > 15000) {
+                        Logf("狀態機", "[HUNTING] 藥水格正常 (%d/%d)，繼續戰鬥",
+                            occupiedCount, minPotionSlots);
+                        s_lastPotionOkLog = now;
+                    }
+                }
+            } else {
+                static DWORD s_lastPotionUnknownLog = 0;
+                if (now - s_lastPotionUnknownLog > 5000) {
+                    Logf("狀態機", "[HUNTING] 藥水狀態未知，跳過回城判定 (%s)",
+                        GetInventoryScanStatusName(inventoryStatus));
+                    s_lastPotionUnknownLog = now;
+                }
+            }
+        }
+
+        // 遊戲時間自動回城
+        if (g_cfg.auto_game_time.load() && CheckGameTimeReturn(gh)) {
+            Log("狀態機", "[HUNTING] 遊戲時間到，回城");
+            SendKeyInputFocused(g_cfg.key_waypoint_start, gh->hWnd);
+            s_returnStartTime = now;
+            s_returnCardSent = true;
+            TransitionState(BotState::RETURNING, "GameTimeReturn", &st);
+            Sleep(100);
+            return;
+        }
+
+        // 遊戲時間自動返回野外
+        if (g_cfg.auto_game_time.load() && g_cfg.auto_return_to_field.load() &&
+            CheckGameTimeBackToField(gh)) {
+            Log("狀態機", "[HUNTING] 遊戲時間到，返回野外");
+            SendKeyInputFocused(g_cfg.key_waypoint_end, gh->hWnd);
+            s_returnStartTime = now;
+            s_returnCardSent = true;
+            TransitionState(BotState::BACK_TO_FIELD, "GameTimeBackToField", &st);
+            Sleep(100);
+            return;
+        }
+
+        // 撿物品
+        static DWORD lastPickupLog = 0;
+        if (g_cfg.auto_pickup.load()) {
+            DWORD pickupDelay = (DWORD)g_cfg.pickup_interval_ms.load();
+            if (pickupDelay < 200) pickupDelay = 200;
+            if (now - s_lastPickupTime > pickupDelay) {
+                s_lastPickupTime = now;
+                BYTE key = g_cfg.key_pickup;
+                SendKeyInputFocused(key, gh->hWnd);
+            }
+            if (now - lastPickupLog > 10000) {
+                Logf("撿物", "auto_pickup=ON, interval=%dms", pickupDelay);
+                lastPickupLog = now;
+            }
+        }
+        // 輔助技能
+        DoSupportSkill(gh->hWnd);
+        bool usedPacketCombat = RunPacketCombatIntentTick(gh, st);
+        if (!usedPacketCombat) {
+            TryAutoTarget(gh->hWnd, gh);
+            DoCombatTick(gh->hWnd, gh);
+        }
+        s_wasInHunting = true;
+    } else {
+        if (s_wasInHunting) {
+            Logf("狀態機", "[HUNTING] 離開戰鬥狀態, 前往: %s", GetStateName(currentState));
+            s_wasInHunting = false;
+        }
+    }
+    // 狀態日誌
+    if (now - s_lastStatusLog > 5000) {
+        const char* stateName = GetStateName(currentState);
+        Logf("狀態", "Lv=%d HP=%d/%d(%d%%) MP=%d/%d(%d%%) Map=%d [%s]",
+            st.level, st.hp, st.maxHp, hpPct, st.mp, st.maxMp, mpPct, st.mapId, stateName);
+        int skillCount = g_cfg.attackSkillCount.load();
+        if (skillCount > 0) {
+            int idx = g_cfg.currentSkillIndex.load() % skillCount;
+            BYTE numKey = (idx < 9) ? (BYTE)('1' + idx) : (BYTE)'0';
+            Logf("狀態", "攻擊技能: %d/%d (按鍵:'%c')  喝水: HP<%d%% MP<%d%% SP<%d%%",
+                idx + 1, skillCount, (char)numKey,
+                g_cfg.hp_potion_pct.load(),
+                g_cfg.mp_potion_pct.load(),
+                g_cfg.sp_potion_pct.load());
+        }
+        s_lastStatusLog = now;
+    }
+    Sleep(50);
+}
+// ============================================================
+// SupplyTick 子函數（SupplyForceReset 已於 line 68 前向宣告）
+// ============================================================
+static void ForceResetToBackToField(GameHandle* gh);
+static void SupplyCheckGlobalTimeout(GameHandle* gh);
+static void SupplyOnEnterPhase(int phase);
+static void SupplyOnExitPhase(int phase);
+static void SupplyForceReset(void) {
+    s_supplyPhase = 0;
+    s_supplyPhaseStart = 0;
+    s_supplyRetryCount = 0;
+    s_invBase = 0;
+    s_phase0SubStep = 0;
+    s_phase0RClickTime = 0;
+    s_buySubPhase = 0;
+    s_buyPhaseStart = 0;
+    s_supplyEntered = false;
+    s_globalTimeout = 0;
+    s_lastSupplyPhase = -1;
+    s_sellSessionActive = false;
+    s_lastSellAction = 0;
+    s_backToFieldCardSent = 0;
+    Log("狀態機", "[SupplyForceReset] 所有靜態變數已重置");
+}
+// DWORD 繞環安全比較：now 是否已超過 deadline（處理 GetTickCount 49.7天繞環）
+static inline bool IsTickExpired(DWORD now, DWORD deadline) {
+    return (now - deadline) < 0x80000000;
+}
+static void SupplyCheckGlobalTimeout(GameHandle* gh) {
+    (void)gh;
+    DWORD now = GetTickCount();
+    if (s_globalTimeout > 0 && IsTickExpired(now, s_globalTimeout)) {
+        Log("狀態機", "★★★ [TOWN_SUPPLY] 全域超時 45 秒！強制返回野外 ★★★");
+        SupplyForceReset();
+        TransitionState(BotState::BACK_TO_FIELD, "SupplyGlobalTimeout45s", NULL);
+    }
+}
+static void SupplyOnEnterPhase(int phase) {
+    switch (phase) {
+        case 0: Log("狀態機", "[Phase 0] 走向 NPC 並開啟對話"); break;
+        case 1: Log("狀態機", "[Phase 1] 發送 SPACE 開商店"); break;
+        case 2: Log("狀態機", "[Phase 2] 自動賣物"); break;
+        case 3: Log("狀態機", "[Phase 3] 自動買藥"); s_buySubPhase = 0; break;
+        case 4: Log("狀態機", "[Phase 4] 關閉商店 → 返回野外"); break;
+    }
+}
+static void SupplyOnExitPhase(int phase) {
+    (void)phase;
+}
+static void ForceResetToBackToField(GameHandle* gh) {
+    if (g_State.load() == (int)BotState::BACK_TO_FIELD && s_backToFieldCardSent) {
+        s_backToFieldStartTime = GetTickCount();
+        return;
+    }
+    TransitionState(BotState::BACK_TO_FIELD, "ForceResetToBackToField", NULL);
+    s_backToFieldCardSent = 0;
+    Log("狀態機", "→ 已強制切換到 BACK_TO_FIELD");
+    SendKeyInputFocused(g_cfg.key_waypoint_end, gh->hWnd);
+    s_backToFieldCardSent = GetTickCount();
+}
+// ============================================================
+// SupplyTick - 聖門專用診斷版（90秒超時）
+// 特點：
+//   1. 聖門座標 Hardcoded，確保精確
+//   2. 90秒全域超時（比舊版 45秒更寬鬆）
+//   3. 詳細 Logf 逐階段追蹤
+//   4. 前景點擊 + FocusGameWindow 保證輸入抵達
+// ============================================================
+void SupplyTick(GameHandle* gh) {
+    if (!gh || !gh->attached || !gh->hWnd) {
+        static DWORD s_lastNoGhLog = 0;
+        DWORD now = GetTickCount();
+        if (now - s_lastNoGhLog > 3000) {
+            Log("狀態機", "⚠️ [SupplyTick] gh 未就緒，跳過");
+            s_lastNoGhLog = now;
+        }
+        return;
+    }
+
+    if (s_reentryGuard) {
+        static DWORD s_lastReentryLog = 0;
+        DWORD now = GetTickCount();
+        if (now - s_lastReentryLog > 3000) {
+            Log("狀態機", "⚠️ [SupplyTick] 偵測到重入，略過本次 tick");
+            s_lastReentryLog = now;
+        }
+        return;
+    }
+
+    ReentryGuard guard(s_reentryGuard);  // RAII 自動防重入
+
+    HWND hWnd = gh->hWnd;
+    DWORD now = GetTickCount();
+
+    // ── 前景焦點包裝巨集──────────────────────────────
+#define FOCUS_CLICK(x, y) do { \
+        FocusGameWindow(hWnd); \
+        ClickAtDirect(hWnd, x, y); \
+    } while(0)
+#define FOCUS_RCLICK(x, y) do { \
+        FocusGameWindow(hWnd); \
+        RClickAtDirect(hWnd, x, y); \
+    } while(0)
+
+    // ── BACK_TO_FIELD 分支─────────────────────────────
+    if (g_State.load() == (int)BotState::BACK_TO_FIELD) {
+        if (!s_backToFieldCardSent) {
+            FocusGameWindow(hWnd);
+            SendKeyInputFocused(g_cfg.key_waypoint_end, hWnd);
+            s_backToFieldCardSent = now;
+            s_backToFieldStartTime = now;
+            Log("狀態機", "[BACK_TO_FIELD] 發送前點卡");
+        }
+        DWORD minDelay = (DWORD)g_cfg.teleport_delay_ms.load();
+        if (minDelay < 8000) minDelay = 8000;
+        DWORD elapsed = now - s_backToFieldStartTime;
+
+        // Bug 1 修復：15秒超時保護，防止 NPC 對話或傳送延遲卡死
+        DWORD hardTimeout = 15000;
+        if (elapsed > hardTimeout) {
+            Logf("狀態機", "[BACK_TO_FIELD] 超時（%dms > %dms），強制回到 HUNTING", elapsed, hardTimeout);
+            SupplyForceReset();
+            TransitionState(BotState::HUNTING, "BackToFieldTimeout", NULL);
+            return;
+        }
+
+        if (elapsed >= minDelay) {
+            PlayerState fieldState;
+            char confirmReason[160] = {0};
+            if (ReadPlayerStateDetailed(gh, &fieldState, confirmReason, sizeof(confirmReason)) == PlayerStateReadStatus::OK &&
+                ConfirmBackToFieldArrival(fieldState, confirmReason, sizeof(confirmReason))) {
+                Logf("狀態機", "[BACK_TO_FIELD → HUNTING] 傳送確認成功（%dms）: %s",
+                    elapsed, confirmReason);
+                SupplyForceReset();
+                TransitionState(BotState::HUNTING, confirmReason, &fieldState);
+                return;
+            }
+
+            DWORD confirmTimeout = GetTransitionConfirmTimeoutMs(minDelay, 16000);
+            if (elapsed >= confirmTimeout) {
+                Logf("狀態機", "❌ [BACK_TO_FIELD] 傳送確認超時（%dms）: %s",
+                    elapsed, confirmReason[0] ? confirmReason : "讀值仍未有效");
+                SupplyForceReset();
+                // Bug 1 修復：超時回 HUNTING 而非 IDLE，避免用戶需要手動重啟
+                TransitionState(BotState::HUNTING, "BackToFieldConfirmTimeout", NULL);
+                return;
+            }
+        }
+        return;
+    }
+
+    // ── 全域超時檢查（90秒）──────────────────────────
+    if (s_globalTimeout > 0 && IsTickExpired(now, s_globalTimeout)) {
+        Log("狀態機", "★★★ [TOWN_SUPPLY] 全域超時 90 秒！強制返回野外 ★★★");
+        SupplyForceReset();
+        TransitionState(BotState::BACK_TO_FIELD, "SupplyGlobalTimeout90s", NULL);
+        s_backToFieldCardSent = 0;
+        return;
+    }
+
+    if (!s_supplyEntered) {
+        PlayerState supplyState;
+        char supplyReason[160] = {0};
+        PlayerStateReadStatus supplyRead = ReadPlayerStateDetailed(gh, &supplyState, supplyReason, sizeof(supplyReason));
+        if (supplyRead != PlayerStateReadStatus::OK) {
+            Logf("狀態機", "❌ [TOWN_SUPPLY] 進入前讀值無效: %s", supplyReason);
+            TransitionState(BotState::IDLE, "SupplyEntryReadInvalid", NULL);
+            g_cfg.active.store(false);
+            return;
+        }
+        if (!IsTownMap(supplyState.mapId)) {
+            char confirmReason[160] = {0};
+            if (!ConfirmReturnArrival(supplyState, confirmReason, sizeof(confirmReason))) {
+                Logf("狀態機", "❌ [TOWN_SUPPLY] 尚未確認到城，拒絕進入補給: %s", confirmReason);
+                TransitionState(BotState::IDLE, "SupplyEntryNotConfirmed", &supplyState);
+                g_cfg.active.store(false);
+                return;
+            }
+        }
+        Log("狀態機", "=== [TOWN_SUPPLY] 進入聖門補給狀態，全域重置 ===");
+        SupplyForceReset();
+        s_supplyEntered = true;
+        s_globalTimeout = now + 90000;  // 90秒超時
+        s_lastSupplyPhase = -1;
+        s_phase0RClickTime = 0;
+    }
+
+    DWORD phaseElapsed = (s_supplyPhaseStart == 0) ? 0 : (now - s_supplyPhaseStart);
+
+    // ═══════════════════════════════════════════════════════════
+    // Phase 0: 走向 NPC (577,140) → 右鍵對話 → 購買物品
+    // ═══════════════════════════════════════════════════════════
+    if (s_supplyPhase == 0) {
+        if (s_lastSupplyPhase != 0) {
+            SupplyOnEnterPhase(0);
+            s_lastSupplyPhase = 0;
+            Logf("狀態機", "[Phase 0] 開始 - 點擊 NPC (577,140)");
+        }
+
+        // Step 0: 左鍵點擊 NPC
+        if (s_phase0SubStep == 0) {
+            FOCUS_CLICK(577, 140);  // NPC coordinates
+            Logf("狀態機", "[Phase 0] Step0: 左鍵點擊 NPC");
+            s_phase0SubStep = 1;
+            s_phase0RClickTime = now;
+            Sleep(1200);
+            return;
+        }
+
+        // Step 1: 右鍵點擊 NPC（等待 4.5 秒後）
+        if (s_phase0SubStep == 1) {
+            if (now - s_phase0RClickTime > 4500) {
+                FOCUS_RCLICK(577, 140);  // NPC coordinates
+                Logf("狀態機", "[Phase 0] Step1: 右鍵點擊 NPC @ %dms", now - s_phase0RClickTime);
+                s_phase0SubStep = 2;
+                s_phase0RClickTime = now;
+                Sleep(800);
+            }
+            return;
+        }
+
+        // Step 2: 點擊「購買物品」
+        if (s_phase0SubStep == 2) {
+            if (now - s_phase0RClickTime > 3500) {
+                FOCUS_CLICK(440, 390);  // Buy button coordinates
+                Logf("狀態機", "[Phase 0] Step2: 點擊購買物品 @ %dms", now - s_phase0RClickTime);
+                s_phase0SubStep = 3;
+                s_phase0RClickTime = now;
+                Sleep(1000);
+            }
+            return;
+        }
+
+        // Step 3: 等待商店開啟
+        if (s_phase0SubStep == 3) {
+            if (now - s_phase0RClickTime > 6000) {
+                Logf("狀態機", "[Phase 0 → Phase 1] 商店應已開啟 @ %dms", now - s_phase0RClickTime);
+                SupplyOnExitPhase(0);
+                s_supplyPhase = 1;
+                s_supplyPhaseStart = now;
+                s_phase0SubStep = 0;
+            }
+            return;
+        }
+
+        return;
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // Phase 1: 發送 SPACE 確認商店開啟
+    // ═══════════════════════════════════════════════════════════
+    if (s_supplyPhase == 1) {
+        if (s_lastSupplyPhase != 1) {
+            SupplyOnEnterPhase(1);
+            s_lastSupplyPhase = 1;
+            Log("狀態機", "[Phase 1] 開始 - 發送 SPACE");
+        }
+
+        FocusGameWindow(hWnd);
+        SendKeyInputFocused(VK_SPACE, hWnd);
+        Logf("狀態機", "[Phase 1] 已發送 SPACE (已耗時 %dms)", phaseElapsed);
+
+        if (phaseElapsed > 6500) {
+            Log("狀態機", "[Phase 1 → Phase 2] 商店已就緒");
+            SupplyOnExitPhase(1);
+            s_supplyPhase = 2;
+            s_supplyPhaseStart = now;
+        }
+        return;
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // Phase 2: 自動賣物
+    // ═══════════════════════════════════════════════════════════
+    if (s_supplyPhase == 2) {
+        if (s_lastSupplyPhase != 2) {
+            SupplyOnEnterPhase(2);
+            s_lastSupplyPhase = 2;
+            Log("狀態機", "[Phase 2] 開始 - 賣物");
+        }
+
+        if (!s_sellSessionActive) {
+            // 掃描背包，過濾保護物品
+            std::vector<InvSlot> slots;
+            if (ScanInventory(gh, &slots) > 0) {
+                BotConfig* cfg = GetBotConfig();
+                EnterCriticalSection(&cfg->cs_protected);
+                for (auto it = slots.begin(); it != slots.end(); ) {
+                    bool isProtected = false;
+                    if (it->itemId == 0 || it->itemId == 0xFFFFFFFF) {
+                        isProtected = true;
+                    } else {
+                        for (size_t i = 0; i < cfg->protected_item_ids.size(); i++) {
+                            DWORD protId = (DWORD)cfg->protected_item_ids[i];
+                            if (protId != 0 && it->itemId == protId) { isProtected = true; break; }
+                        }
+                        if (!isProtected) {
+                            int row = it->slotIdx / 6;
+                            if (row >= 0 && row < BotConfig::MAX_INVENTORY_ROWS) {
+                                if (cfg->protected_rows[row]) isProtected = true;
+                            }
+                        }
+                    }
+                    if (isProtected) it = slots.erase(it);
+                    else ++it;
+                }
+                LeaveCriticalSection(&cfg->cs_protected);
+
+                if (!slots.empty()) {
+                    Logf("賣物", "[Phase 2] 找到 %d 個可賣物品，點擊賣物資", (int)slots.size());
+                    ClickAtDirect(gh->hWnd, Coords::GetNPCSellItemPos().x, Coords::GetNPCSellItemPos().z);
+                    Sleep(800);
+                    s_sellSessionActive = true;
+                    s_lastSellAction = now;
+                } else {
+                    Log("狀態機", "[Phase 2] 沒有可賣物品 → Phase 3");
+                    s_sellSessionActive = false;
+                    SupplyOnExitPhase(2);
+                    s_supplyPhase = 3;
+                    s_supplyPhaseStart = now;
+                    return;
+                }
+            } else {
+                // ScanInventory 返回 0（背包讀取失敗或背包空的）→ 直接進 Phase 3
+                Log("賣物", "[Phase 2] 背包掃描返回 0 → 跳過賣物，直接 Phase 3");
+                s_supplyPhase = 3;
+                s_supplyPhaseStart = now;
+                return;
+            }
+        } else {
+            DWORD sellElapsed = now - s_lastSellAction;
+            if (sellElapsed > 5000) {
+                Log("狀態機", "[Phase 2] 賣物超時 → Phase 3");
+                s_sellSessionActive = false;
+                SupplyOnExitPhase(2);
+                s_supplyPhase = 3;
+                s_supplyPhaseStart = now;
+                return;
+            }
+            if (sellElapsed > 1200) {
+                Logf("賣物", "[Phase 2] 點擊確認");
+                ClickAtDirect(gh->hWnd, Coords::GetNPCSellConfirmPos().x, Coords::GetNPCSellConfirmPos().z);
+                s_lastSellAction = now;
+            }
+        }
+
+        if (phaseElapsed > 25000) {
+            Log("狀態機", "[Phase 2] 超時 25s → Phase 3");
+            s_sellSessionActive = false;
+            SupplyOnExitPhase(2);
+            s_supplyPhase = 3;
+            s_supplyPhaseStart = now;
+        }
+        return;
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // Phase 3: 買藥水（消耗品分頁 → HP/MP/SP）
+    // ═══════════════════════════════════════════════════════════
+    if (s_supplyPhase == 3) {
+        if (s_lastSupplyPhase != 3) {
+            s_buyPhaseStart = now;
+            SupplyOnEnterPhase(3);
+            s_lastSupplyPhase = 3;
+            Log("狀態機", "[Phase 3] 開始 - 買藥");
+        }
+
+        BotConfig* cfg = GetBotConfig();
+        if (!cfg->auto_buy.load()) {
+            Log("狀態機", "[Phase 3] auto_buy=OFF → Phase 4");
+            SupplyOnExitPhase(3);
+            s_supplyPhase = 4;
+            s_supplyPhaseStart = now;
+            return;
+        }
+
+        DWORD buyElapsed = now - s_buyPhaseStart;
+        if (buyElapsed > 25000) {
+            Logf("狀態機", "[Phase 3] 買藥超時 25s → Phase 4");
+            SupplyOnExitPhase(3);
+            s_supplyPhase = 4;
+            s_supplyPhaseStart = now;
+            return;
+        }
+
+        int hpQty = cfg->buy_hp_qty.load();
+        int mpQty = cfg->buy_mp_qty.load();
+        int spQty = cfg->buy_sp_qty.load();
+        int remaining = (hpQty > 0 ? 1 : 0) + (mpQty > 0 ? 1 : 0) + (spQty > 0 ? 1 : 0);
+
+        if (remaining == 0) {
+            Log("狀態機", "[Phase 3] 購買數量為 0 → Phase 4");
+            SupplyOnExitPhase(3);
+            s_supplyPhase = 4;
+            s_supplyPhaseStart = now;
+            return;
+        }
+
+        // SubPhase 0: 點擊「消耗品」分頁 (699, 253)
+        if (s_buySubPhase == 0) {
+            Logf("狀態機", "[Phase 3] SubPhase0: 點擊消耗品分頁");
+            FOCUS_CLICK(699, 253);  // Consume tab coordinates
+            Sleep(1000);
+            s_buySubPhase = 1;
+            return;
+        }
+
+        // SubPhase 1-3: 依序買 HP / MP / SP
+        int buyIdx = s_buySubPhase - 1;  // 0=HP, 1=MP, 2=SP
+        if (buyIdx >= 0 && buyIdx < 3) {
+            int* qtyArr[3] = { &hpQty, &mpQty, &spQty };
+            const char* itemNames[3] = { "HP", "MP", "SP" };
+            const int itemXs[3] = { 320, 360, 400 };  // HP, MP, SP X coordinates
+            const int itemYs[3] = { 280, 280, 280 };  // HP, MP, SP Y coordinates
+
+            int qty = *qtyArr[buyIdx];
+            if (qty > 0) {
+                Logf("狀態機", "[Phase 3] SubPhase%d: 購買 %s x%d",
+                    s_buySubPhase, itemNames[buyIdx], qty);
+
+                // 1) 點擊商品
+                FOCUS_CLICK(itemXs[buyIdx], itemYs[buyIdx]);
+                Sleep(600);
+
+                // 2) 點擊數量框
+                FOCUS_CLICK(520, 420);  // Quantity input box coordinates
+                Sleep(300);
+
+                // 3) Ctrl+A 全選 → 輸入數量
+                SendCtrlA(hWnd);
+                Sleep(100);
+                TypeNumber(hWnd, qty);
+                Sleep(400);
+
+                // 4) 點擊確認
+                FOCUS_CLICK(500, 450);  // Buy confirm button coordinates
+                Sleep(1500);
+
+                Logf("狀態機", "[Phase 3] %s 購買完成", itemNames[buyIdx]);
+            }
+
+            s_buySubPhase++;
+            if (s_buySubPhase > 3) {
+                Log("狀態機", "[Phase 3] 全部購買完成 → Phase 4");
+                SupplyOnExitPhase(3);
+                s_supplyPhase = 4;
+                s_supplyPhaseStart = now;
+            }
+        }
+        return;
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // Phase 4: 關閉商店 → 返回野外（前點卡）
+    // ═══════════════════════════════════════════════════════════
+    if (s_supplyPhase == 4) {
+        if (s_lastSupplyPhase != 4) {
+            SupplyOnEnterPhase(4);
+            s_lastSupplyPhase = 4;
+            Log("狀態機", "[Phase 4] 開始 - 關閉商店");
+        }
+
+        Logf("狀態機", "[Phase 4] 發送 ESC × 2 → 前點卡");
+        SendKeyInputFocused(VK_ESCAPE, hWnd);
+        SleepJitter(600);
+        SendKeyInputFocused(VK_ESCAPE, hWnd);
+        SleepJitter(600);
+
+        // 重置並切回 BACK_TO_FIELD
+        SupplyForceReset();
+        TransitionState(BotState::BACK_TO_FIELD, "SupplyPhase4Complete", NULL);
+        s_backToFieldCardSent = 0;
+    }
+}
+
+// ============================================================
+// Missing function stubs (required by state_handler.cpp)
+// ============================================================
+
+void RequestRecovery(const char* reason) {
+    Log("Recovery", reason);
+    // Trigger recovery state if not already in it
+    if (GetBotState() != BotState::RECOVERY) {
+        SetBotState(BotState::RECOVERY);
+    }
+}
+
+bool IsTownMap(int mapId) {
+    BotConfig* cfg = GetBotConfig();
+    for (int id : cfg->townMapIds) {
+        if (mapId == id) return true;
+    }
+    return false;
+}
+
+bool ExecuteRevive(HWND hWnd) {
+    Log("復活", "ExecuteRevive called");
+    // Click center of screen to revive
+    LPARAM center = MAKELPARAM(50, 50);
+    SendMessage(hWnd, WM_LBUTTONDOWN, MK_LBUTTON, center);
+    Sleep(100);
+    SendMessage(hWnd, WM_LBUTTONUP, 0, center);
+    return true;
 }

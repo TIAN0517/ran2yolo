@@ -9,8 +9,9 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
-#include "../config/offset_config.h"
-#include "../gui/gui_ranbot.h"
+#include "attack_packet.h"
+#include "offset_config.h"
+#include "gui_ranbot.h"
 #include <cstring>
 #include <cstdio>
 
@@ -72,7 +73,7 @@ static bool InitWinsock() {
 // ============================================================
 // 建立 TCP 連接
 // ============================================================
-static bool ConnectToServer() {
+static bool ConnectToServer(DWORD timeoutMs) {
     if (s_socket != INVALID_SOCKET) {
         return true;  // 已經連接
     }
@@ -107,12 +108,18 @@ static bool ConnectToServer() {
         return false;
     }
 
+    u_long nonBlocking = 1;
+    ioctlsocket(s_socket, FIONBIO, &nonBlocking);
+
     ret = connect(s_socket, result->ai_addr, (int)result->ai_addrlen);
     freeaddrinfo(result);
 
     if (ret == SOCKET_ERROR) {
         int err = WSAGetLastError();
-        if (err != WSAEISCONN) {
+        if (err != WSAEISCONN &&
+            err != WSAEWOULDBLOCK &&
+            err != WSAEINPROGRESS &&
+            err != WSAEALREADY) {
             sprintf_s(s_error, "connect failed: %d", err);
             UIAddLog("[Attack] TCP 連接失敗: %s:%d - %s",
                 s_serverIp, s_serverPort, s_error);
@@ -120,7 +127,37 @@ static bool ConnectToServer() {
             s_socket = INVALID_SOCKET;
             return false;
         }
+
+        fd_set wfds;
+        FD_ZERO(&wfds);
+        FD_SET(s_socket, &wfds);
+        timeval tv;
+        tv.tv_sec = (long)(timeoutMs / 1000);
+        tv.tv_usec = (long)((timeoutMs % 1000) * 1000);
+
+        int sel = select(0, NULL, &wfds, NULL, &tv);
+        if (sel <= 0) {
+            sprintf_s(s_error, "connect timeout");
+            UIAddLog("[Attack] TCP 連接逾時: %s:%d", s_serverIp, s_serverPort);
+            closesocket(s_socket);
+            s_socket = INVALID_SOCKET;
+            return false;
+        }
+
+        int soErr = 0;
+        int soErrLen = sizeof(soErr);
+        if (getsockopt(s_socket, SOL_SOCKET, SO_ERROR, (char*)&soErr, &soErrLen) != 0 || soErr != 0) {
+            sprintf_s(s_error, "connect failed: %d", soErr);
+            UIAddLog("[Attack] TCP 連接失敗: %s:%d - %s",
+                s_serverIp, s_serverPort, s_error);
+            closesocket(s_socket);
+            s_socket = INVALID_SOCKET;
+            return false;
+        }
     }
+
+    u_long blocking = 0;
+    ioctlsocket(s_socket, FIONBIO, &blocking);
 
     UIAddLog("[Attack] TCP 連接成功: %s:%d", s_serverIp, s_serverPort);
     return true;
@@ -142,7 +179,7 @@ bool InitAttackSender(const char* serverIp, int serverPort) {
     s_targetMid = 0;
     s_targetSid = 0;
 
-    bool connected = ConnectToServer();
+    bool connected = ConnectToServer(200);
     if (connected) {
         UIAddLog("[Attack] 攻擊發送器已初始化 (Server: %s:%d)", s_serverIp, s_serverPort);
     } else {
@@ -163,6 +200,14 @@ void ShutdownAttackSender() {
     LeaveCriticalSection(&s_cs);
     DeleteCriticalSection(&s_cs);
     WSACleanup();
+}
+
+bool TryAttackSenderConnect(int timeoutMs) {
+    if (timeoutMs < 0) timeoutMs = 0;
+    EnterCriticalSection(&s_cs);
+    bool ok = ConnectToServer((DWORD)timeoutMs);
+    LeaveCriticalSection(&s_cs);
+    return ok;
 }
 
 // ============================================================
@@ -281,7 +326,7 @@ static bool SendPacket(const BYTE* data, int len) {
     EnterCriticalSection(&s_cs);
 
     if (s_socket == INVALID_SOCKET) {
-        if (!ConnectToServer()) {
+        if (!ConnectToServer(50)) {
             LeaveCriticalSection(&s_cs);
             return false;
         }
@@ -303,7 +348,7 @@ static bool SendPacket(const BYTE* data, int len) {
             }
             LeaveCriticalSection(&s_cs);
             UIAddLog("[Attack] 連接重置，嘗試重建...");
-            if (ConnectToServer()) {
+            if (ConnectToServer(50)) {
                 ret = send(s_socket, (const char*)data, len, 0);
             }
         }

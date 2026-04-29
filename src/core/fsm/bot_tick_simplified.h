@@ -179,26 +179,27 @@ static void BotTickSimplified(GameHandle* gh) {
     // 觸發 Pattern Scan（如需要）
     TriggerPatternScanIfNeeded(gh);
 
-    // ── IDLE → HUNTING 冷卻：防止 RECOVERY → IDLE → HUNTING 快速循環 ──
-    static DWORD s_lastRecoveryTick = 0;
-    static bool s_justRecovered = false;
-    if (currentState == BotState::RECOVERY) {
-        s_lastRecoveryTick = now;
-        s_justRecovered = true;
-    }
-    if (currentState == BotState::IDLE && s_justRecovered) {
-        if ((now - s_lastRecoveryTick) < 3000) {
-            // 冷卻中：等待 3 秒讓記憶體讀取穩定
-            Sleep(100);
-            return;
-        }
-        s_justRecovered = false;  // 冷卻結束
-    }
+    // ── IDLE → HUNTING 冷卻：防止快速震盪 ──
+    static DWORD s_lastIdleToHuntingTime = 0;
+    static bool s_idleJustTransitioned = false;
 
     // ── 延遲啟動：遊戲就緒時從 IDLE 推進到 HUNTING ──
     if (currentState == BotState::IDLE) {
+        // 防止快速重複轉換：至少間隔 1 秒
+        if (s_idleJustTransitioned && (now - s_lastIdleToHuntingTime) < 1000) {
+            Sleep(100);
+            return;
+        }
+
         TransitionState(BotState::HUNTING, "DelayedStartGameReady", NULL);
         currentState = GetBotState();
+
+        // 標記剛轉換，等待冷卻
+        s_idleJustTransitioned = true;
+        s_lastIdleToHuntingTime = now;
+    } else {
+        // 非 IDLE 狀態：重置標記
+        s_idleJustTransitioned = false;
     }
 
     // ── 單一路徑：使用 State Handler 處理目前狀態 ──

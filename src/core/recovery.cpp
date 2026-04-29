@@ -11,6 +11,33 @@
 #include <ctime>
 
 // ============================================================
+// VLM Blocking Issue & Action Enums (定義於此，與 recovery_vision.cpp 共用)
+// ============================================================
+namespace RecoverySystem {
+    enum class VLMBlockingIssue {
+        Unknown = 0,
+        Popup,
+        Terrain,
+        Dead,
+        InventoryFull,
+        NpcDialog,
+        ShopDialog,
+        Loading
+    };
+
+    enum class VLMSuggestedAction {
+        NoAction = 0,
+        PressESCx3MoveRandom,
+        ReturnToTown,
+        WaitForLoading,
+        AcceptDialog,
+        CloseShop,
+        Resurrect,
+        ClearInventory
+    };
+}
+
+// ============================================================
 // 內部狀態
 // ============================================================
 namespace RecoverySystem {
@@ -262,8 +289,8 @@ void InitRecoverySystem() {
     RecoverySystem::s_phase = RecoverySystem::Phase::INIT;
     RecoverySystem::s_attempts = 0;
     RecoverySystem::s_escPressCount = 0;
-    RecoverySystem::s_lastIssue = VLMBlockingIssue::Unknown;
-    RecoverySystem::s_lastAction = VLMSuggestedAction::NoAction;
+    RecoverySystem::s_lastIssue = RecoverySystem::VLMBlockingIssue::Unknown;
+    RecoverySystem::s_lastAction = RecoverySystem::VLMSuggestedAction::NoAction;
     RecoverySystem::s_floorClickIndex = 0;
     RecoverySystem::s_initialized = true;
 

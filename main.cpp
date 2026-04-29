@@ -17,13 +17,11 @@
 #include "gui_ranbot.h"
 #include "offset_config.h"
 #include "config_updater.h"
-#include "license_admin_gui.h"
 
 // ImGui
 #include "imgui/imgui.h"
 #include "imgui/imgui_impl_dx9.h"
 #include "imgui/imgui_impl_win32.h"
-#include "resource.h"
 
 // 連結 DirectX9 庫（因為無法修改 vcxproj）
 #ifdef _MSC_VER
@@ -37,10 +35,10 @@ static void Dbgf(const char* fmt, ...);
 void CleanupGameProcess();
 
 // ============================================================
-// 窗口尺寸常量 (GUI 視窗大小)
+// 窗口尺寸常量
 // ============================================================
-static const int WINDOW_WIDTH = 900;
-static const int WINDOW_HEIGHT = 600;
+static const int WINDOW_WIDTH = 720;
+static const int WINDOW_HEIGHT = 900;
 
 // ============================================================
 // DirectX9 全局變量
@@ -63,9 +61,6 @@ bool g_alwaysOnTop = false;           // 是否置頂（默認關閉，不擋遊
 static bool CreateDeviceD3D(HWND hWnd) {
     if ((g_pD3D = Direct3DCreate9(D3D_SDK_VERSION)) == nullptr)
         return false;
-
-    // ✅ 獲取預設監視器句柄（用於全螢幕或特殊場景）
-    HMONITOR hMonitor = g_pD3D->GetAdapterMonitor(D3DADAPTER_DEFAULT);
 
     ZeroMemory(&g_d3dpp, sizeof(g_d3dpp));
 
@@ -242,38 +237,10 @@ static DWORD WINAPI BotThread(LPVOID) {
         // 更新全域句柄供 GUI 使用
         SetGameHandle(&gh);
 
-        // DEBUG: 驗證 SetGameHandle 是否正確存儲
-        {
-            GameHandle verifyGh = GetGameHandle();
-            UIAddLog("[DEBUG] SetGameHandle 驗證: pid=%u hProcess=%p baseAddr=0x%08X attached=%d",
-                verifyGh.pid, verifyGh.hProcess, verifyGh.baseAddr, verifyGh.attached);
-            printf("[DEBUG] SetGameHandle 驗證: pid=%u hProcess=%p baseAddr=0x%08X attached=%d\n",
-                verifyGh.pid, verifyGh.hProcess, verifyGh.baseAddr, verifyGh.attached);
-        }
-
         // BotTick 迴圈（同時輪詢熱鍵）
-        // 改為：如果 hProcess 有效就嘗試運行，baseAddr=0 會由 BotTick 內部的刷新邏輯處理
-        while (g_Running && gh.hProcess && IsGameRunning(&gh)) {
+        while (g_Running && gh.attached && IsGameRunning(&gh)) {
             // F11/F12 現由專屬熱鍵執行緒處理（SetWindowsHookEx）
             BotTick(&gh);
-
-            // 如果 gh.baseAddr=0，嘗試刷新（每 10 秒一次）
-            if (!gh.baseAddr && gh.hProcess) {
-                static DWORD lastRefresh = 0;
-                DWORD now = GetTickCount();
-                if (now - lastRefresh > 10000) {
-                    DWORD newBase = RefreshGameBaseAddress(&gh);
-                    if (newBase) {
-                        gh.baseAddr = newBase;
-                        gh.attached = 1;
-                        SetGameHandle(&gh);  // 更新全域句柄
-                        UIAddLog("[DEBUG] 刷新 baseAddr 成功: 0x%08X", newBase);
-                    }
-                    lastRefresh = now;
-                }
-            }
-
-            if (!SleepInterruptible(20)) break;
         }
 
         CloseGameHandle(&gh);
@@ -382,51 +349,16 @@ static void Dbgf(const char* fmt, ...) {
 }
 
 int main() {
-    // ===== DPI 感知設定（解決座標飄移問題）=====
-    // 在 XP SP3 以上可用，Win7/Win10/Win11 都支援
-    // 關閉 Windows DPI 縮放，避免座標計算錯誤
-    {
-        typedef BOOL(WINAPI* SetProcessDPIAwareFunc)(void);
-        HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
-        if (hUser32) {
-            // 嘗試新版 SetProcessDpiAwareness (Vista+)
-            typedef HRESULT(WINAPI* SetProcessDPIAwareFunc2)(int);
-            SetProcessDPIAwareFunc2 pfn2 = (SetProcessDPIAwareFunc2)
-                GetProcAddress(hUser32, "SetProcessDpiAwareness");
-            if (pfn2) {
-                // PROCESS_PER_MONITOR_DPI_AWARE = 2，完全禁用 DPI 縮放
-                pfn2(2);
-                printf("[Init] SetProcessDpiAwareness(2) OK\n");
-            } else {
-                // 舊版 SetProcessDPIAware (XP SP3+)
-                SetProcessDPIAwareFunc pfn = (SetProcessDPIAwareFunc)
-                    GetProcAddress(hUser32, "SetProcessDPIAware");
-                if (pfn) {
-                    pfn();
-                    printf("[Init] SetProcessDPIAware() OK\n");
-                }
-            }
-        }
-    }
-
     // 設定控制台為 UTF-8 編碼（Win7/Win10 通用，解決中文顯示亂碼）
     SetConsoleOutputCP(65001);   // CP_UTF8
     SetConsoleCP(65001);
     setlocale(LC_ALL, ".65001");
 
-    // YOLO/ONNX 延遲載入（在第一次使用時自動載入）
-    printf("[Init] YOLO support enabled (lazy load on first use)\n");
-
     // 檢查命令列參數
     bool hiddenMode = false;
-    bool launchAdminGui = false;
     const char* explicitOffsetPath = NULL;
     for (int i = 1; i < __argc; i++) {
         if (!__argv[i]) continue;
-        if (_stricmp(__argv[i], "-admin") == 0) {
-            launchAdminGui = true;
-            continue;
-        }
         if (_stricmp(__argv[i], "-hidden") == 0 || _stricmp(__argv[i], "-h") == 0) {
             hiddenMode = true;
             continue;
@@ -435,20 +367,6 @@ int main() {
             i + 1 < __argc && __argv[i + 1]) {
             explicitOffsetPath = __argv[++i];
         }
-    }
-
-    // -admin 模式：啟動授權管理 GUI
-    if (launchAdminGui) {
-        CoInitialize(NULL);
-        if (InitLicenseAdminGui(GetModuleHandle(NULL), SW_SHOWNORMAL)) {
-            MSG msg = {};
-            while (GetMessageW(&msg, NULL, 0, 0)) {
-                TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            }
-        }
-        CoUninitialize();
-        return 0;
     }
 
     Dbg("=== 主程式進入 ===");
@@ -528,8 +446,6 @@ int main() {
     wc.hInstance = GetModuleHandle(NULL);
     wc.lpszClassName = TEXT("JyTrainerWindow");
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wc.hIcon = (HICON)LoadImage(GetModuleHandle(NULL), MAKEINTRESOURCE(IDI_APP_ICON), IMAGE_ICON, 0, 0, LR_DEFAULTSIZE | LR_SHARED);
-    wc.hIconSm = (HICON)LoadImage(GetModuleHandle(NULL), MAKEINTRESOURCE(IDI_APP_ICON), IMAGE_ICON, 16, 16, LR_SHARED);
     // 深色背景刷，與 ImGui 主題一致
     wc.hbrBackground = CreateSolidBrush(RGB(26, 28, 38));
     RegisterClassEx(&wc);
@@ -571,7 +487,6 @@ int main() {
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    io.ConfigDebugHighlightIdConflicts = false; // 禁用 ID 衝突警告（避免紅框干擾）
 
     // 加載中文字體
     printf("[Init] Loading fonts...\n");
@@ -610,7 +525,6 @@ int main() {
     }
 
     printf("[Init] Font loading done. Font pointer: %p\n", (void*)font);
-    io.FontGlobalScale = 0.8f; // ✅ 全域字體縮小 20%
 
     SetupImGuiStyle();
 
@@ -646,22 +560,6 @@ int main() {
             continue;
         }
 
-        // 🐛 修復: 設備狀態檢查需要在 NewFrame 之前，防止設備丟失時 ImGui 內部狀態不一致
-        HRESULT deviceStatus = g_pd3dDevice->TestCooperativeLevel();
-        if (deviceStatus == D3DERR_DEVICELOST) {
-            Sleep(50);
-            continue;
-        } else if (deviceStatus == D3DERR_DEVICENOTRESET) {
-            ImGui_ImplDX9_InvalidateDeviceObjects();
-            HRESULT resetResult = g_pd3dDevice->Reset(&g_d3dpp);
-            if (resetResult == D3D_OK) {
-                ImGui_ImplDX9_CreateDeviceObjects();
-            } else {
-                Sleep(50);
-                continue;
-            }
-        }
-
         // 開始 ImGui 幀（每次循環都要更新，確保滑鼠狀態正確）
         ImGui_ImplDX9_NewFrame();
         ImGui_ImplWin32_NewFrame();
@@ -673,22 +571,28 @@ int main() {
         // 渲染
         ImGui::EndFrame();
 
-        // ✅ 重置所有可能干擾渲染的狀態（防止閃爍）
+        // 🐛 修復: 增強設備狀態檢查，處理設備丟失和重置
+        HRESULT deviceStatus = g_pd3dDevice->TestCooperativeLevel();
+        if (deviceStatus == D3DERR_DEVICELOST) {
+            // 設備丟失，等待恢復
+            Sleep(50);
+            continue;
+        } else if (deviceStatus == D3DERR_DEVICENOTRESET) {
+            // 設備需要重置
+            ImGui_ImplDX9_InvalidateDeviceObjects();
+            HRESULT resetResult = g_pd3dDevice->Reset(&g_d3dpp);
+            if (resetResult == D3D_OK) {
+                ImGui_ImplDX9_CreateDeviceObjects();
+            } else {
+                printf("[警告] Device Reset 失敗: 0x%08lX\n", (unsigned long)resetResult);
+                Sleep(50);
+                continue;
+            }
+        }
+
         g_pd3dDevice->SetRenderState(D3DRS_ZENABLE, FALSE);
-        g_pd3dDevice->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
-        g_pd3dDevice->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
-        g_pd3dDevice->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
-        g_pd3dDevice->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
-        g_pd3dDevice->SetRenderState(D3DRS_STENCILENABLE, FALSE);
+        g_pd3dDevice->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
         g_pd3dDevice->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
-        g_pd3dDevice->SetRenderState(D3DRS_COLORWRITEENABLE, 0x0F);  // 啟用所有顏色通道
-        g_pd3dDevice->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
-        g_pd3dDevice->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
-        g_pd3dDevice->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
-        g_pd3dDevice->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
-        g_pd3dDevice->SetFVF(D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX1);
-        g_pd3dDevice->SetPixelShader(nullptr);
-        g_pd3dDevice->SetVertexShader(nullptr);
 
         // ✅ 確保視口與窗口一致
         RECT rc;
@@ -696,28 +600,16 @@ int main() {
         D3DVIEWPORT9 vp = {0, 0, (DWORD)rc.right, (DWORD)rc.bottom, 0.0f, 1.0f};
         g_pd3dDevice->SetViewport(&vp);
 
-        // ✅ 完全清除後緩衝區（防止殘影和閃爍）- 每次渲染前執行
-        g_pd3dDevice->Clear(0, NULL,
-            D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL,
-            D3DCOLOR_ARGB(255, 26, 28, 38), 1.0f, 0);
-
-        // ✅ 執行緒安全：鎖定 UI 數據再渲染
-        extern void LockRenderData();
-        extern void UnlockRenderData();
-        LockRenderData();
+        // 深色背景清除
+        g_pd3dDevice->Clear(0, NULL, D3DCLEAR_TARGET, D3DCOLOR_ARGB(255, 26, 28, 38), 1.0f, 0);
 
         if (g_pd3dDevice->BeginScene() >= 0) {
             ImGui::Render();
             ImGui_ImplDX9_RenderDrawData(ImGui::GetDrawData());
             g_pd3dDevice->EndScene();
-
-            // ✅ Present 前等待垂直同步，避免撕裂和閃爍
-            if (g_pd3dDevice->Present(NULL, NULL, NULL, NULL) == D3DERR_DEVICELOST) {
-                // 設備丟失，下一幀會處理
-            }
+            g_pd3dDevice->Present(NULL, NULL, NULL, NULL);
         }
 
-        UnlockRenderData();
         Sleep(16);  // ~60 FPS 幀率限制
     }
 

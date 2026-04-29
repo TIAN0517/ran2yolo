@@ -12,11 +12,6 @@
 #include <cstdio>
 #include <cstdarg>
 #include <winreg.h>
-#include <winternl.h>
-
-#ifndef NT_SUCCESS
-#define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
-#endif
 
 // ============================================================
 // Forward Declaration
@@ -320,11 +315,11 @@ static bool IsKnownGameExeNameW(const wchar_t* exeName) {
     if (!exeName || !exeName[0]) return false;
 
     static const wchar_t* kKnownNames[] = {
-        L"Game.exe", L"Gf.exe", L"Ran2.exe", L"Ran2Online.exe",
+        L"Game.exe", L"Gf.exe", L"Ran2.exe",
         L"亂2online.exe", L"乱2online.exe", L"Ran2Online.exe",
         L"亂2 Online.exe", L"乱2 Online.exe",
         L"RAN2.exe", L"Ran-2.exe", L"Ran-2 Online.exe",
-        L"gf.exe", L"ran2.exe", L"ran2online.exe",
+        L"gf.exe", L"ran2.exe",
     };
 
     for (size_t i = 0; i < sizeof(kKnownNames) / sizeof(kKnownNames[0]); ++i) {
@@ -340,11 +335,11 @@ static bool IsKnownGameExeNameA(const char* exeName) {
     if (!exeName || !exeName[0]) return false;
 
     static const char* kKnownNames[] = {
-        "Game.exe", "Gf.exe", "Ran2.exe", "Ran2Online.exe",
+        "Game.exe", "Gf.exe", "Ran2.exe",
         "亂2online.exe", "乱2online.exe", "Ran2Online.exe",
         "亂2 Online.exe", "乱2 Online.exe",
         "RAN2.exe", "Ran-2.exe", "Ran-2 Online.exe",
-        "gf.exe", "ran2.exe", "ran2online.exe",
+        "gf.exe", "ran2.exe",
     };
 
     for (size_t i = 0; i < sizeof(kKnownNames) / sizeof(kKnownNames[0]); ++i) {
@@ -362,7 +357,6 @@ static bool IsAlternateGameExeNameW(const wchar_t* exeName) {
         L"亂2online.exe", L"乱2online.exe",
         L"亂2 Online.exe", L"乱2 Online.exe",
         L"RAN2.exe", L"Ran-2.exe",
-        L"Ran2Online.exe",
     };
     for (size_t i = 0; i < sizeof(kAltNames) / sizeof(kAltNames[0]); ++i) {
         if (_wcsicmp(exeName, kAltNames[i]) == 0) return true;
@@ -376,7 +370,6 @@ static bool IsAlternateGameExeNameA(const char* exeName) {
         "亂2online.exe", "乱2online.exe",
         "亂2 Online.exe", "乱2 Online.exe",
         "RAN2.exe", "Ran-2.exe",
-        "Ran2Online.exe",
     };
     for (size_t i = 0; i < sizeof(kAltNames) / sizeof(kAltNames[0]); ++i) {
         if (_stricmp(exeName, kAltNames[i]) == 0) return true;
@@ -454,8 +447,8 @@ void SetGameHandle(GameHandle* gh) {
         CloseHandle(oldHandle);
     }
 
-    LogGame("[Handle] SetGameHandle: pid=%u hProcess=%p baseAddr=" ADDR_FORMAT " attached=%d",
-        gh->pid, gh->hProcess, (ADDR)gh->baseAddr, gh->attached);
+    LogGame("[Handle] SetGameHandle: pid=%u hProcess=%p baseAddr=0x%08X attached=%d",
+        gh->pid, gh->hProcess, gh->baseAddr, gh->attached);
 }
 
 // ============================================================
@@ -574,102 +567,22 @@ static bool IsGameModule(const wchar_t* modName, const char* fullPath) {
 }
 
 // 驗證模組基址是否合理（32位元遊戲不應該在極高位址）
-// 注意：有些遊戲（如 Ran2）可能載入在 0x00310000，低於預設的 0x00400000
-// 最低允許位址設為 0x00100000 (1MB)，這是 PE 檔案的最小載入位址
-static bool IsReasonableBase(ADDR base) {
-    if (base == 0) return false;
-    if (base < 0x00100000) {
-        LogGame("[偵測] IsReasonableBase: base=0x%08X < 0x00100000 (太低)", (DWORD)base);
-        return false;
-    }
-    if (base >= 0x80000000) {
-        LogGame("[偵測] IsReasonableBase: base=0x%08X >= 0x80000000 (太高)", (DWORD)base);
-        return false;
-    }
+static bool IsReasonableBase(DWORD base) {
+    // 0x00400000 is a valid non-ASLR x86 image base. Reject only invalid user-mode ranges.
+    if (base < 0x00400000) return false;
+    if (base >= 0x80000000) return false;
     return true;
 }
 
-static ADDR TryGetImageBaseFromPeb(GameHandle* gh) {
-    if (!gh || !gh->hProcess) return 0;
-
-    typedef NTSTATUS (NTAPI* NtQueryInformationProcessFn)(
-        HANDLE, PROCESSINFOCLASS, PVOID, ULONG, PULONG);
-
-    HMODULE hNt = GetModuleHandleW(L"ntdll.dll");
-    NtQueryInformationProcessFn ntQuery = hNt
-        ? (NtQueryInformationProcessFn)GetProcAddress(hNt, "NtQueryInformationProcess")
-        : NULL;
-    if (!ntQuery) return 0;
-
-    ULONG_PTR peb32 = 0;
-    NTSTATUS status = ntQuery(gh->hProcess, (PROCESSINFOCLASS)26,
-        &peb32, sizeof(peb32), NULL);  // ProcessWow64Information
-
-    if (NT_SUCCESS(status) && peb32) {
-        DWORD imageBase32 = 0;
-        SIZE_T bytesRead = 0;
-        if (ReadProcessMemory(gh->hProcess, (LPCVOID)(peb32 + 0x08),
-                &imageBase32, sizeof(imageBase32), &bytesRead) &&
-            bytesRead == sizeof(imageBase32)) {
-            ADDR addr = (ADDR)imageBase32;
-            if (IsReasonableBase(addr)) {
-                LogGame("[偵測] ✅ WOW64 PEB ImageBaseAddress = " ADDR_FORMAT, addr);
-                return addr;
-            } else {
-                LogGame("[偵測] WOW64 PEB base=0x%08X 不合理，嘗試其他方法", imageBase32);
-            }
-        } else {
-            LogGame("[偵測] WOW64 PEB ImageBaseAddress 讀取失敗 (err=%u)", GetLastError());
-        }
-    } else if (NT_SUCCESS(status) && !peb32) {
-        LogGame("[偵測] 進程不是 WOW64 (64-bit 進程或無法確定)");
-    } else {
-        LogGame("[偵測] NtQueryInformationProcess WOW64 查詢失敗 (status=0x%08X)", status);
-    }
-
-    // 嘗試讀取 64-bit PEB
-    PROCESS_BASIC_INFORMATION pbi = {};
-    ULONG retLen = 0;
-    status = ntQuery(gh->hProcess, ProcessBasicInformation,
-        &pbi, sizeof(pbi), &retLen);
-    if (NT_SUCCESS(status) && pbi.PebBaseAddress) {
-#ifdef _WIN64
-        ADDR imageBase = 0;
-        SIZE_T bytesRead = 0;
-        if (ReadProcessMemory(gh->hProcess,
-                (LPCVOID)((BYTE*)pbi.PebBaseAddress + 0x10),
-                &imageBase, sizeof(imageBase), &bytesRead) &&
-            bytesRead == sizeof(imageBase) &&
-            imageBase >= 0x10000) {
-            if (IsReasonableBase(imageBase)) {
-                LogGame("[偵測] ✅ Native PEB ImageBaseAddress = " ADDR_FORMAT, imageBase);
-                return imageBase;
-            } else {
-                LogGame("[偵測] Native PEB base=0x%016llX 不合理", imageBase);
-            }
-        } else {
-            LogGame("[偵測] Native PEB ImageBaseAddress 讀取失敗 (err=%u)", GetLastError());
-        }
-#endif
-    } else {
-        LogGame("[偵測] ProcessBasicInformation 查詢失敗 (status=0x%08X)", (unsigned int)status);
-    }
-
-    LogGame("[偵測] PEB ImageBaseAddress fallback 失敗");
-    return 0;
-}
-
 // 前向宣告（RefreshGameBaseAddress 在 GetGameBaseAddress 之前定義）
-// 32位元統一使用 DWORD
 DWORD GetGameBaseAddress(GameHandle* gh);
 
 // 刷新遊戲模組基址（傳入現有 GameHandle，不重新 OpenProcess）
-// 32位元統一使用 DWORD
 DWORD RefreshGameBaseAddress(GameHandle* gh) {
     if (!gh || !gh->hProcess) return 0;
     DWORD base = GetGameBaseAddress(gh);
     if (base) {
-        gh->baseAddr = (ADDR)base;
+        gh->baseAddr = base;
         gh->attached = true;
         LogGame("[Handle] ✅ RefreshGameBaseAddress 成功: baseAddr=0x%08X", base);
     }
@@ -677,21 +590,10 @@ DWORD RefreshGameBaseAddress(GameHandle* gh) {
 }
 
 DWORD GetGameBaseAddress(GameHandle* gh) {
-    if (!gh || !gh->hProcess) {
-        LogGame("[偵測] ❌ GetGameBaseAddress: gh=%p 或 hProcess=NULL", (void*)gh);
-        OutputDebugStringA("[偵測] ❌ GetGameBaseAddress: gh=NULL or hProcess=NULL\n");
-        printf("[偵測] ❌ GetGameBaseAddress: gh=%p 或 hProcess=NULL\n", (void*)gh);
-        return 0;
-    }
+    if (!gh || !gh->hProcess) return 0;
 
     bool isWin7 = IsWin7System();
-    char debugBuf[256];
-    sprintf_s(debugBuf, "[偵測] [%s] GetGameBaseAddress 開始 (hProcess=%p, pid=%u)...\n",
-        isWin7 ? "Win7" : "Win10/11", gh->hProcess, gh->pid);
-    LogGame("%s", debugBuf);
-    OutputDebugStringA(debugBuf);
-    printf("%s", debugBuf);
-    fflush(stdout);
+    LogGame("[偵測] [%s] 開始取得遊戲主模組基址...", isWin7 ? "Win7" : "Win10/11");
 
     // ── 優先：CreateToolhelp32Snapshot ──
     DWORD snapFlags = TH32CS_SNAPMODULE;
@@ -700,50 +602,29 @@ DWORD GetGameBaseAddress(GameHandle* gh) {
     }
 
     HANDLE snap = CreateToolhelp32Snapshot(snapFlags, gh->pid);
-    printf("[偵測] CreateToolhelp32Snapshot snapFlags=0x%X, pid=%u, result=%p\n", snapFlags, gh->pid, snap);
-    LogGame("[偵測] CreateToolhelp32Snapshot snapFlags=0x%X, pid=%u, result=%p", snapFlags, gh->pid, snap);
     if (snap == INVALID_HANDLE_VALUE) {
         DWORD err = GetLastError();
-        printf("[偵測] ❌ CreateToolhelp32Snapshot 失敗 (code=%u)\n", (unsigned int)err);
         LogGame("[偵測] CreateToolhelp32Snapshot 失敗 (code=%u)，改用 EnumProcessModules", (unsigned int)err);
     } else {
         MODULEENTRY32 me = {};
         me.dwSize = sizeof(MODULEENTRY32);
 
         BOOL ok = Module32First(snap, &me);
-        int moduleCount = 0;
         while (ok) {
-            // 除錯：輸出所有模組名稱到 LogGame
-            LogGame("[偵測] 模組[%d]: %S -> 0x%08X", moduleCount++, me.szModule, (DWORD)(ULONG_PTR)me.modBaseAddr);
-
-            // 除錯：檢查 IsKnownGameExeNameW 的匹配結果
-            bool isKnown = IsKnownGameExeNameW(me.szModule);
-            bool isAlt = IsAlternateGameExeNameW(me.szModule);
-            LogGame("[偵測]   → 檢查結果: isKnown=%d isAlt=%d", isKnown ? 1 : 0, isAlt ? 1 : 0);
-
-            // 額外除錯：檢查 szModule 的長度和內容
-            int nameLen = lstrlenW(me.szModule);
-            LogGame("[偵測]   → szModule len=%d, first5=0x%04X 0x%04X 0x%04X 0x%04X 0x%04X",
-                nameLen,
-                nameLen > 0 ? me.szModule[0] : 0,
-                nameLen > 1 ? me.szModule[1] : 0,
-                nameLen > 2 ? me.szModule[2] : 0,
-                nameLen > 3 ? me.szModule[3] : 0,
-                nameLen > 4 ? me.szModule[4] : 0);
-
             if (IsGameModule(me.szModule, NULL)) {
-                ADDR base = (ADDR)me.modBaseAddr;
-                LogGame("[偵測] CreateToolhelp32Snapshot 匹配遊戲模組: %S (base=" ADDR_FORMAT ")",
-                    me.szModule, base);
+                DWORD base = (DWORD)me.modBaseAddr;
+                LogGame("[偵測] CreateToolhelp32Snapshot 找到 %S (base=0x%08X)",
+                    me.szModule, (unsigned int)base);
                 CloseHandle(snap);
 
                 if (!IsReasonableBase(base)) {
-                    LogGame("[偵測] ❌ Base=" ADDR_FORMAT " 不是合理的 32-bit user-mode 載入位址", base);
+                    LogGame("[偵測] ❌ Base=0x%08X 不是合理的 32-bit user-mode 載入位址",
+                        (unsigned int)base);
                     LogGame("[偵測]    提示：請用管理員身份執行 JyTrainer.exe");
                     return 0;
                 }
 
-                LogGame("[偵測] ✅ 取得遊戲主模組基址 = " ADDR_FORMAT, base);
+                LogGame("[偵測] ✅ 取得遊戲主模組基址 = 0x%08X", (unsigned int)base);
                 return base;
             }
             ok = Module32Next(snap, &me);
@@ -756,12 +637,11 @@ DWORD GetGameBaseAddress(GameHandle* gh) {
 
     if (EnumProcessModules(gh->hProcess, hMods, sizeof(hMods), &cbNeeded)) {
         int count = cbNeeded / sizeof(HMODULE);
-        printf("[偵測] EnumProcessModules 找到 %d 個模組\n", count);
         LogGame("[偵測] EnumProcessModules 找到 %d 個模組:", count);
 
         for (int i = 0; i < count; i++) {
             HMODULE hMod = hMods[i];
-            ADDR base = (ADDR)(ULONG_PTR)hMod;
+            DWORD base = (DWORD)hMod;
             char name[MAX_PATH];
 
             if (GetModuleFileNameExA(gh->hProcess, hMod, name, sizeof(name))) {
@@ -773,16 +653,16 @@ DWORD GetGameBaseAddress(GameHandle* gh) {
                     shortName = name;
                 }
 
-                printf("[偵測] EnumProcessModules[%d]: %s -> 0x%08X\n", i, shortName, (DWORD)(ULONG_PTR)hMod);
-                LogGame("  [%d] %s -> " ADDR_FORMAT, i, shortName, base);
+                LogGame("  [%d] %s -> 0x%08X", i, shortName, (unsigned int)base);
 
                 if (IsGameModule(NULL, name) && IsReasonableBase(base)) {
-                    LogGame("[偵測] ✅ EnumProcessModules 取得遊戲主模組基址 = " ADDR_FORMAT, base);
+                    LogGame("[偵測] ✅ EnumProcessModules 取得遊戲主模組基址 = 0x%08X",
+                        (unsigned int)base);
                     return base;
                 }
 
                 if (IsGameModule(NULL, name) && !IsReasonableBase(base)) {
-                    LogGame("[偵測] ❌ 遊戲主模組 Base=" ADDR_FORMAT " 不合理，忽略", base);
+                    LogGame("[偵測] ❌ 遊戲主模組 Base=0x%08X 不合理，忽略", (unsigned int)base);
                 }
             }
         }
@@ -792,68 +672,31 @@ DWORD GetGameBaseAddress(GameHandle* gh) {
         LogGame("[偵測] EnumProcessModules 失敗 (code=%u)", (unsigned int)err);
     }
 
-    // ── 嘗試從 PEB 讀取 ImageBaseAddress ──
-    ADDR pebBase = TryGetImageBaseFromPeb(gh);
-    if (pebBase && IsReasonableBase(pebBase)) {
-        LogGame("[偵測] ✅ PEB ImageBaseAddress: " ADDR_FORMAT, pebBase);
-        return pebBase;
+    // ── Fallback：直接嘗試從遊戲記憶體空間搜尋 PE Header ──
+    LogGame("[偵測] 直接記憶體搜尋遊戲主模組（最後手段）...");
+    MEMORY_BASIC_INFORMATION mbi = {};
+    DWORD addr = 0x00400000;  // 典型 32-bit 遊戲載入位址
+    while (VirtualQueryEx(gh->hProcess, (LPCVOID)addr, &mbi, sizeof(mbi)) != 0) {
+        if ((mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE)) &&
+            mbi.RegionSize >= 0x1000) {
+            BYTE header[4] = {};
+            SIZE_T bytesRead = 0;
+            ReadProcessMemory(gh->hProcess, (LPCVOID)addr, header, sizeof(header), &bytesRead);
+            if (header[0] == 0x4D && header[1] == 0x5A) {  // "MZ"
+                LogGame("[偵測] 直接記憶體搜尋找到 MZ header @ 0x%08X", addr);
+                if (IsReasonableBase(addr)) {
+                    LogGame("[偵測] ✅ 直接記憶體搜尋成功: 遊戲主模組基址 = 0x%08X", addr);
+                    return addr;
+                }
+            }
+        }
+        addr = (DWORD)mbi.BaseAddress + mbi.RegionSize;
+        if (addr >= 0x80000000) break;
     }
-
-    // ── 已移除 legacy fallback PE Header 掃描 ──
-    // 原因：該方法不可靠，可能掃描到非遊戲模組導致錯誤
-    // 解決方案：使用 Pattern Scan 或依賴 NetHook 共享記憶體
 
     LogGame("[偵測] ❌ 無法取得合理的遊戲主模組基址！");
     LogGame("[偵測]    請確認：1) 遊戲已啟動  2) 以管理員身份執行 JyTrainer.exe");
     return 0;
-}
-
-// ============================================================
-// 取得遊戲模組大小（用於 Pattern Scan 安全邊界）
-// ============================================================
-DWORD GetGameModuleSize(GameHandle* gh) {
-    if (!gh || !gh->hProcess || !gh->baseAddr) {
-        return 0;
-    }
-
-    bool isWin7 = IsWin7System();
-
-    // ── 使用 CreateToolhelp32Snapshot 取得模組大小 ──
-    DWORD snapFlags = TH32CS_SNAPMODULE;
-    if (!isWin7) {
-        snapFlags |= TH32CS_SNAPMODULE32;
-    }
-
-    HANDLE snap = CreateToolhelp32Snapshot(snapFlags, gh->pid);
-    if (snap == INVALID_HANDLE_VALUE) {
-        // Fallback: 使用 EnumProcessModules + GetModuleInformation
-        HMODULE hMod = (HMODULE)(ULONG_PTR)gh->baseAddr;
-        MODULEINFO modInfo = {};
-        if (GetModuleInformation(gh->hProcess, hMod, &modInfo, sizeof(modInfo))) {
-            DWORD size = (DWORD)modInfo.SizeOfImage;
-            LogGame("[偵測] GetGameModuleSize (Enum): 0x%X bytes", size);
-            return size;
-        }
-        return 0;
-    }
-
-    MODULEENTRY32 me = {};
-    me.dwSize = sizeof(MODULEENTRY32);
-
-    BOOL ok = Module32First(snap, &me);
-    DWORD moduleSize = 0;
-    while (ok) {
-        ADDR base = (ADDR)(ULONG_PTR)me.modBaseAddr;
-        if (base == gh->baseAddr) {
-            moduleSize = me.modBaseSize;
-            LogGame("[偵測] GetGameModuleSize: 0x%X bytes", moduleSize);
-            break;
-        }
-        ok = Module32Next(snap, &me);
-    }
-
-    CloseHandle(snap);
-    return moduleSize;
 }
 
 // ============================================================
@@ -952,8 +795,8 @@ bool FindGameProcess(GameHandle* gh) {
         PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_QUERY_INFORMATION,
         // Level 3: 只讀權限（最基本）
         PROCESS_VM_READ | PROCESS_QUERY_INFORMATION,
-        // Level 4: Win10/11 有些行程只允許 limited query，但仍需要 VM_READ
-        PROCESS_VM_READ | PROCESS_QUERY_LIMITED_INFORMATION,
+        // Level 4: 有限查詢權限（Win7 Session 隔離專用）
+        PROCESS_QUERY_LIMITED_INFORMATION,
         // Level 5: 全部權限（最後手段）
         PROCESS_ALL_ACCESS,
     };
@@ -979,22 +822,14 @@ bool FindGameProcess(GameHandle* gh) {
 
     LogGame("[偵測] OpenProcess 成功 (flags=0x%X)", openedAccessFlags);
 
-    // 除錯：記錄即將呼叫 GetGameBaseAddress
-    LogGame("[偵測] >>> 即將呼叫 GetGameBaseAddress(hProcess=%p, pid=%u)",
-        gh->hProcess, gh->pid);
-
     gh->baseAddr = GetGameBaseAddress(gh);
-
-    // 除錯：記錄 GetGameBaseAddress 的結果
-    LogGame("[偵測] <<< GetGameBaseAddress 回傳: baseAddr=0x%08X", gh->baseAddr);
-
     gh->attached = (gh->baseAddr != 0);
 
     if (gh->attached) {
-        printf("[偵測] ✅ 成功附加遊戲！PID=%u Base=" ADDR_FORMAT " HWND=%p\n",
-            (unsigned int)pid, (ADDR)gh->baseAddr, gh->hWnd);
-        LogGame("[偵測] ✅ 成功附加遊戲！PID=%u Base=" ADDR_FORMAT " HWND=%p",
-            (unsigned int)pid, (ADDR)gh->baseAddr, gh->hWnd);
+        printf("[偵測] ✅ 成功附加遊戲！PID=%u Base=0x%08X HWND=%p\n",
+            (unsigned int)pid, (unsigned int)gh->baseAddr, gh->hWnd);
+        LogGame("[偵測] ✅ 成功附加遊戲！PID=%u Base=0x%08X HWND=%p",
+            (unsigned int)pid, (unsigned int)gh->baseAddr, gh->hWnd);
         return true;
     }
 
