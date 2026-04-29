@@ -1,17 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
-    <!-- x64 發布版本 (主要配置) -->
     <ProjectConfiguration Include="Release|x64">
       <Configuration>Release</Configuration>
       <Platform>x64</Platform>
     </ProjectConfiguration>
-    <!-- Win7 x64 版本 -->
     <ProjectConfiguration Include="Release_Win7|x64">
       <Configuration>Release_Win7</Configuration>
       <Platform>x64</Platform>
     </ProjectConfiguration>
-    <!-- 保留 x86 向後兼容 (可選) -->
     <ProjectConfiguration Include="Release|Win32">
       <Configuration>Release</Configuration>
       <Platform>Win32</Platform>
@@ -27,7 +24,7 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v142</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>Unicode</CharacterSet>
     <EnableEditAndContinue>false</EnableEditAndContinue>
@@ -37,24 +34,22 @@
     <OutDir>$(ProjectDir)..\dist\</OutDir>
     <IntDir>$(ProjectDir)obj\$(Configuration)\$(Platform)\</IntDir>
   </PropertyGroup>
-  <!-- ============================================================ -->
-  <!-- x64 Release 配置 (預設) -->
-  <!-- ============================================================ -->
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <OutDir>$(ProjectDir)..\dist\win64\</OutDir>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
+      <DisableSpecificWarnings>4819;%(DisableSpecificWarnings)</DisableSpecificWarnings>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>false</SDLCheck>
       <PreprocessorDefinitions>_WIN64;NDEBUG;_WINDOWS;WINVER=0x0A00;_WIN32_WINNT=0x0A00;_CRT_SECURE_NO_WARNINGS;USE_YOLO_DETECTION;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <BufferSecurityCheck>false</BufferSecurityCheck>
-      <AdditionalOptions>/utf-8 /wd28159 /wd4819 /wd4244 /wd4312 /wd4311 /wd4302 /wd4477 %(AdditionalOptions)</AdditionalOptions>
-      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)imgui;$(ProjectDir)onnxruntime\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>/utf-8 /FS %(AdditionalOptions)</AdditionalOptions>
+      <DebugInformationFormat>None</DebugInformationFormat>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)src\core;$(ProjectDir)src\game;$(ProjectDir)src\input;$(ProjectDir)src\vision;$(ProjectDir)src\gui;$(ProjectDir)src\config;$(ProjectDir)src\platform;$(ProjectDir)src\embed;$(ProjectDir)src\license;$(ProjectDir)src\common;$(ProjectDir)imgui;$(ProjectDir)onnxruntime\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
     </ClCompile>
     <Link>
@@ -63,33 +58,28 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
       <MinimumRequiredVersion>6.0</MinimumRequiredVersion>
-      <AdditionalDependencies>
-        psapi.lib;user32.lib;kernel32.lib;winmm.lib;gdi32.lib;ws2_32.lib;advapi32.lib;wininet.lib;shlwapi.lib;
-        %(AdditionalDependencies)
-      </AdditionalDependencies>
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;psapi.lib;user32.lib;kernel32.lib;winmm.lib;gdi32.lib;ws2_32.lib;advapi32.lib;wininet.lib;shlwapi.lib;winhttp.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <IgnoreAllDefaultLibraries>false</IgnoreAllDefaultLibraries>
       <TargetMachine>MachineX64</TargetMachine>
     </Link>
   </ItemDefinitionGroup>
-  <!-- ============================================================ -->
-  <!-- x64 Win7 配置 (支援 Win7 x64) -->
-  <!-- ============================================================ -->
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release_Win7|x64'">
     <OutDir>$(ProjectDir)..\dist\win7x64\</OutDir>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release_Win7|x64'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
+      <DisableSpecificWarnings>4819;%(DisableSpecificWarnings)</DisableSpecificWarnings>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>false</SDLCheck>
       <PreprocessorDefinitions>_WIN64;NDEBUG;_WINDOWS;WINVER=0x0601;_WIN32_WINNT=0x0601;_CRT_SECURE_NO_WARNINGS;USE_YOLO_DETECTION;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <BufferSecurityCheck>false</BufferSecurityCheck>
-      <AdditionalOptions>/utf-8 /wd28159 /wd4819 /wd4244 /wd4312 /wd4311 /wd4302 /wd4477 %(AdditionalOptions)</AdditionalOptions>
-      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)imgui;$(ProjectDir)onnxruntime\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>/utf-8 /FS %(AdditionalOptions)</AdditionalOptions>
+      <DebugInformationFormat>None</DebugInformationFormat>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)src\core;$(ProjectDir)src\game;$(ProjectDir)src\input;$(ProjectDir)src\vision;$(ProjectDir)src\gui;$(ProjectDir)src\config;$(ProjectDir)src\platform;$(ProjectDir)src\embed;$(ProjectDir)src\license;$(ProjectDir)src\common;$(ProjectDir)imgui;$(ProjectDir)onnxruntime\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
     </ClCompile>
     <Link>
@@ -98,34 +88,29 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
       <MinimumRequiredVersion>6.1</MinimumRequiredVersion>
-      <AdditionalDependencies>
-        psapi.lib;user32.lib;kernel32.lib;winmm.lib;gdi32.lib;ws2_32.lib;advapi32.lib;wininet.lib;shlwapi.lib;
-        %(AdditionalDependencies)
-      </AdditionalDependencies>
+      <AdditionalDependencies>psapi.lib;user32.lib;kernel32.lib;winmm.lib;gdi32.lib;ws2_32.lib;advapi32.lib;wininet.lib;shlwapi.lib;winhttp.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <IgnoreAllDefaultLibraries>false</IgnoreAllDefaultLibraries>
       <TargetMachine>MachineX64</TargetMachine>
       <Icon>app.ico</Icon>
     </Link>
   </ItemDefinitionGroup>
-  <!-- ============================================================ -->
-  <!-- x86 Win32 配置 (保留向後兼容) -->
-  <!-- ============================================================ -->
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <OutDir>$(ProjectDir)..\dist\win32\</OutDir>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
+      <DisableSpecificWarnings>4819;%(DisableSpecificWarnings)</DisableSpecificWarnings>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>false</SDLCheck>
       <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;WINVER=0x0601;_WIN32_WINNT=0x0601;_CRT_SECURE_NO_WARNINGS;_USING_V110_SDK71_;USE_YOLO_DETECTION;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <BufferSecurityCheck>false</BufferSecurityCheck>
-      <AdditionalOptions>/utf-8 /wd28159 /wd4819 /wd4244 /wd4312 /wd4311 /wd4302 /wd4477 %(AdditionalOptions)</AdditionalOptions>
-      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)imgui;$(ProjectDir)onnxruntime\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>/utf-8 /FS %(AdditionalOptions)</AdditionalOptions>
+      <DebugInformationFormat>None</DebugInformationFormat>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)src\core;$(ProjectDir)src\game;$(ProjectDir)src\input;$(ProjectDir)src\vision;$(ProjectDir)src\gui;$(ProjectDir)src\config;$(ProjectDir)src\platform;$(ProjectDir)src\embed;$(ProjectDir)src\license;$(ProjectDir)src\common;$(ProjectDir)imgui;$(ProjectDir)onnxruntime\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
     </ClCompile>
     <Link>
@@ -134,10 +119,7 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
       <MinimumRequiredVersion>5.01</MinimumRequiredVersion>
-      <AdditionalDependencies>
-        psapi.lib;user32.lib;kernel32.lib;winmm.lib;gdi32.lib;ws2_32.lib;advapi32.lib;wininet.lib;shlwapi.lib;
-        %(AdditionalDependencies)
-      </AdditionalDependencies>
+      <AdditionalDependencies>psapi.lib;user32.lib;kernel32.lib;winmm.lib;gdi32.lib;ws2_32.lib;advapi32.lib;wininet.lib;shlwapi.lib;winhttp.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <IgnoreAllDefaultLibraries>false</IgnoreAllDefaultLibraries>
     </Link>
@@ -145,30 +127,99 @@
       <Command>if exist "$(ProjectDir)onnxruntime\onnxruntime.dll" copy /Y "$(ProjectDir)onnxruntime\onnxruntime.dll" "$(OutDir)" 2&gt;nul</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
-  <!-- 核心 C++ 檔 -->
+  <!-- 主程式碼 (src/) -->
   <ItemGroup>
-    <ClCompile Include="attack_packet.cpp" />
-    <ClCompile Include="bot_logic.cpp" />
-    <ClCompile Include="screenshot.cpp" />
-    <ClCompile Include="game_process.cpp" />
-    <ClCompile Include="input_sender.cpp" />
+    <!-- Core -->
+    <ClCompile Include="src\core\bot_logic.cpp" />
+        <ClCompile Include="src\core\pattern_scanner.cpp" />
+    <ClCompile Include="src\core\recovery.cpp" />
+    <ClCompile Include="src\core\recovery_vision.cpp" />
+    <ClCompile Include="src\core\fsm\state_handler.cpp" />
+    <ClCompile Include="src\core\fsm\fsm_integration.cpp" />
+    <!-- Game -->
+    <ClCompile Include="src\game\game_process.cpp" />
+    <ClCompile Include="src\game\memory_reader.cpp" />
+    <ClCompile Include="src\game\nethook_shmem.cpp" />
+    <!-- Input -->
+    <ClCompile Include="src\input\attack_packet.cpp" />
+    <ClCompile Include="src\input\input_sender.cpp" />
+    <ClCompile Include="src\input\screenshot.cpp" />
+    <ClCompile Include="src\input\target_lock.cpp" />
+    <!-- Vision -->
+    <ClCompile Include="src\vision\dm_visual.cpp" />
+    <ClCompile Include="src\vision\dm_visual_supply.cpp" />
+    <ClCompile Include="src\vision\visionentity.cpp" />
+    <ClCompile Include="src\vision\screenshot_universal.cpp" />
+    <ClCompile Include="src\vision\vlm_vision_api.cpp" />
+    <ClCompile Include="src\vision\vision_api_rotator.cpp" />
+    <ClCompile Include="src\vision\nvidia_key_rotator.cpp" />
+    <!-- Config -->
+    <ClCompile Include="src\config\config_updater.cpp" />
+    <ClCompile Include="src\config\offset_config.cpp" />
+    <!-- Platform -->
+    <ClCompile Include="src\platform\coord_calib.cpp" />
+    <!-- Embed -->
+    <ClCompile Include="src\embed\dm_plugin.cpp" />
+    <ClCompile Include="src\embed\dm_wrapper.cpp" />
+    <ClCompile Include="src\embed\embedded_resources.cpp" />
+    <!-- GUI -->
+    <ClCompile Include="src\gui\gui_ranbot.cpp" />
+    <!-- License -->
+    <ClCompile Include="src\license\license_admin_gui.cpp" />
+    <ClCompile Include="src\license\offline_license.cpp" />
+    <!-- Root -->
     <ClCompile Include="main.cpp" />
-    <ClCompile Include="memory_reader.cpp" />
-    <ClCompile Include="offline_license.cpp" />
-    <ClCompile Include="offset_config.cpp" />
-    <ClCompile Include="config_updater.cpp" />
-    <ClCompile Include="nethook_shmem.cpp" />
-    <ClCompile Include="target_lock.cpp" />
-    <ClCompile Include="screenshot_assist.cpp" />
-    <ClCompile Include="coord_calib.cpp" />
-    <ClCompile Include="visionentity.cpp" />
-    <ClCompile Include="yolo_detector.cpp" />
-    <ClCompile Include="onnx_loader.cpp" />
-    <ClCompile Include="embedded_resources.cpp" />
+    <ClCompile Include="miniz.c" />
   </ItemGroup>
-  <!-- 核心 -->
+  <!-- Header 檔案 (src/) -->
   <ItemGroup>
-    <ClCompile Include="gui_ranbot.cpp" />
+    <!-- Core -->
+    <ClInclude Include="src\core\bot_logic.h" />
+        <ClInclude Include="src\core\fsm\state_machine.h" />
+    <ClInclude Include="src\core\fsm\state_handler.h" />
+    <ClInclude Include="src\core\fsm\bot_tick_simplified.h" />
+    <ClInclude Include="src\core\pattern_scanner.h" />
+    <ClInclude Include="src\core\recovery_vision.h" />
+    <!-- Game -->
+    <ClInclude Include="src\game\game_process.h" />
+    <ClInclude Include="src\game\memory_reader.h" />
+    <ClInclude Include="src\game\nethook_shmem.h" />
+    <ClInclude Include="src\game\packet_offsets.h" />
+        <!-- Input -->
+    <ClInclude Include="src\input\attack_packet.h" />
+    <ClInclude Include="src\input\input_sender.h" />
+    <ClInclude Include="src\input\screenshot.h" />
+    <ClInclude Include="src\input\target_lock.h" />
+    <!-- Vision -->
+    <ClInclude Include="src\vision\dm_visual.h" />
+    <ClInclude Include="src\vision\vision_fusion.h" />
+    <ClInclude Include="src\vision\dm_visual_supply.h" />
+    <ClInclude Include="src\vision\visionentity.h" />
+    <ClInclude Include="src\vision\vlm_vision_api.h" />
+    <ClInclude Include="src\vision\vision_api_rotator.h" />
+    <ClInclude Include="src\vision\nvidia_key_rotator.h" />
+    <!-- Config -->
+    <ClInclude Include="src\config\config_updater.h" />
+    <ClInclude Include="src\config\offset_config.h" />
+    <ClInclude Include="src\config\offsets.h" />
+    <ClInclude Include="src\config\coords.h" />
+    <!-- Platform -->
+    <ClInclude Include="src\platform\coord_calib.h" />
+    <ClInclude Include="src\platform\win32_helpers.h" />
+    <!-- Embed -->
+    <ClInclude Include="src\embed\dm_plugin.h" />
+    <ClInclude Include="src\embed\dm_wrapper.h" />
+    <ClInclude Include="src\embed\embedded_resources.h" />
+    <!-- GUI -->
+    <ClInclude Include="src\gui\gui_ranbot.h" />
+    <!-- License -->
+    <ClInclude Include="src\license\license_admin_gui.h" />
+    <ClInclude Include="src\license\offline_license.h" />
+    <!-- Common -->
+    <ClInclude Include="src\common\utils.h" />
+    <!-- Root -->
+    <ClInclude Include="miniz.h" />
+    <ClInclude Include="resource.h" />
   </ItemGroup>
   <!-- ImGui 庫 -->
   <ItemGroup>
@@ -179,47 +230,15 @@
     <ClCompile Include="imgui\imgui_impl_dx9.cpp" />
     <ClCompile Include="imgui\imgui_impl_win32.cpp" />
   </ItemGroup>
-  <ItemGroup>
-    <ClInclude Include="gui_ranbot.h" />
-    <ClInclude Include="screenshot.h" />
-  </ItemGroup>
-  <!-- 現有頭文件 -->
-  <ItemGroup>
-    <ClInclude Include="attack_packet.h" />
-    <ClInclude Include="bot_logic.h" />
-    <ClInclude Include="coords.h" />
-    <ClInclude Include="game_process.h" />
-    <ClInclude Include="input_sender.h" />
-    <ClInclude Include="memory_reader.h" />
-    <ClInclude Include="offline_license.h" />
-    <ClInclude Include="offset_config.h" />
-    <ClInclude Include="config_updater.h" />
-    <ClInclude Include="offsets.h" />
-    <ClInclude Include="win32_helpers.h" />
-    <ClInclude Include="nethook_shmem.h" />
-    <ClInclude Include="screenshot_assist.h" />
-    <ClInclude Include="visionentity.h" />
-    <ClInclude Include="embedded_images.h" />
-    <ClInclude Include="resource.h" />
-    <ClInclude Include="yolo_detector.h" />
-    <ClInclude Include="onnx_config.h" />
-    <ClInclude Include="onnx_loader.h" />
-    <ClInclude Include="embed_dlls.h" />
-    <ClInclude Include="embedded_resources.h" />
-  </ItemGroup>
-  <!-- 應用程式圖示資源 -->
-  <ItemGroup>
-    <Image Include="app.ico" />
-  </ItemGroup>
-  <ItemGroup>
-    <ClCompile Include="license_admin_gui.cpp" />
-    <ClCompile Include="license_admin_gui_main.cpp" />
-  </ItemGroup>
+  <!-- 資源檔 -->
   <ItemGroup>
     <ResourceCompile Include="app.rc" />
   </ItemGroup>
   <ItemGroup>
     <Manifest Include="JyTrainer.manifest" />
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="..\app.ico" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

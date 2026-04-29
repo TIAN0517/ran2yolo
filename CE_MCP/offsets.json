@@ -1,0 +1,76 @@
+{
+  "comment": "RAN2 封包偏移 - IDA + CE 驗證 (2026-04-25)",
+  "version": "2.0",
+  "verification_date": "2026-04-25",
+  "verification_method": "IDA Pro decompilation of 0x636480 (NPCBuySell)",
+  "functions": {
+    "NPCBuySell": {"address": "0x636480", "note": "NPC 買賣處理函數", "verified": true},
+    "PacketBuild": {"address": "0x58B6D0", "note": "封包建構函數", "verified": true}
+  },
+  "msgids": {
+    "NPC_TALK": {"value": "0x34D2", "decimal": 13522, "size": 12},
+    "NPC_BUY": {"value": "0x34F7", "decimal": 13559, "size": 26},
+    "NPC_SELL": {"value": "0x34F8", "decimal": 13560, "size": 16},
+    "NPC_CLOSE": {"value": "0x34D3", "decimal": 13523, "size": 8},
+    "PICKUP_ITEM": {"value": "0x3427", "decimal": 13351, "size": 12},
+    "PICKUP_GOLD": {"value": "0x3429", "decimal": 13353, "size": 12}
+  },
+  "packet_structures": {
+    "NPC_TALK": {
+      "msgid": "0x34D2", "decimal": 13522, "total_size": 12,
+      "fields": [
+        {"name": "dwSize", "offset": 0, "size": 4, "value": 12},
+        {"name": "dwMsgID", "offset": 4, "size": 4, "value": 13522},
+        {"name": "npcGlobId", "offset": 8, "size": 4}
+      ]
+    },
+    "NPC_BUY": {
+      "msgid": "0x34F7", "decimal": 13559, "total_size": 26,
+      "note": "IDA verified at 0x636A1B: size=0x1A",
+      "fields": [
+        {"name": "dwSize", "offset": 0, "size": 4, "value": 26},
+        {"name": "dwMsgID", "offset": 4, "size": 4, "value": 13559},
+        {"name": "itemId", "offset": 8, "size": 4},
+        {"name": "subId", "offset": 12, "size": 4},
+        {"name": "channel", "offset": 16, "size": 4, "value": 0},
+        {"name": "npcGlobId", "offset": 20, "size": 4},
+        {"name": "tab", "offset": 24, "size": 2},
+        {"name": "slot", "offset": 26, "size": 2}
+      ]
+    },
+    "NPC_SELL": {
+      "msgid": "0x34F8", "decimal": 13560, "total_size": 16,
+      "note": "IDA verified at 0x636AD1: size=0x10",
+      "fields": [
+        {"name": "dwSize", "offset": 0, "size": 4, "value": 16},
+        {"name": "dwMsgID", "offset": 4, "size": 4, "value": 13560},
+        {"name": "itemId", "offset": 8, "size": 4, "value": 0},
+        {"name": "subId", "offset": 12, "size": 4, "value": 0},
+        {"name": "npcGlobId", "offset": 16, "size": 4}
+      ]
+    },
+    "NPC_CLOSE": {
+      "msgid": "0x34D3", "decimal": 13523, "total_size": 8,
+      "fields": [
+        {"name": "dwSize", "offset": 0, "size": 4, "value": 8},
+        {"name": "dwMsgID", "offset": 4, "size": 4, "value": 13523}
+      ]
+    },
+    "PICKUP_ITEM": {
+      "msgid": "0x3427", "decimal": 13351, "total_size": 12,
+      "fields": [
+        {"name": "dwSize", "offset": 0, "size": 4, "value": 12},
+        {"name": "dwMsgID", "offset": 4, "size": 4, "value": 13351},
+        {"name": "itemId", "offset": 8, "size": 4}
+      ]
+    },
+    "PICKUP_GOLD": {
+      "msgid": "0x3429", "decimal": 13353, "total_size": 12,
+      "fields": [
+        {"name": "dwSize", "offset": 0, "size": 4, "value": 12},
+        {"name": "dwMsgID", "offset": 4, "size": 4, "value": 13353},
+        {"name": "goldId", "offset": 8, "size": 4}
+      ]
+    }
+  }
+}
