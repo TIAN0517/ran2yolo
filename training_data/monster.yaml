@@ -1,0 +1,6 @@
+names:
+  0: monster
+nc: 1
+path: C:\Users\tian7\Desktop\BossJy\JyTrainer\training_data
+train: images
+val: images
